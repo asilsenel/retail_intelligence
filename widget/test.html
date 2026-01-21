@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beymen - Luxury Fashion</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&family=Inter:wght@300;400;500;600&display=swap"
+        rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --black: #000000;
+            --white: #FFFFFF;
+            --grey-light: #F5F5F5;
+            --grey-medium: #E5E5E5;
+            --grey-text: #666666;
+            --font-serif: 'Playfair Display', Georgia, serif;
+            --font-sans: 'Inter', -apple-system, sans-serif;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--white);
+            color: var(--black);
+        }
+
+        /* === BEYMEN HEADER === */
+        .header {
+            background: var(--black);
+            padding: 0 48px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 64px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .logo {
+            font-family: var(--font-serif);
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--white);
+            letter-spacing: 6px;
+            text-transform: uppercase;
+        }
+
+        .nav {
+            display: flex;
+            gap: 40px;
+        }
+
+        .nav a {
+            color: var(--white);
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 400;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            opacity: 0.85;
+            transition: opacity 0.2s;
+        }
+
+        .nav a:hover {
+            opacity: 1;
+        }
+
+        .header-icons {
+            display: flex;
+            gap: 20px;
+        }
+
+        .header-icons svg {
+            width: 22px;
+            height: 22px;
+            fill: var(--white);
+            cursor: pointer;
+            opacity: 0.85;
+            transition: opacity 0.2s;
+        }
+
+        .header-icons svg:hover {
+            opacity: 1;
+        }
+
+        /* === HERO SECTION === */
+        .hero {
+            height: 85vh;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: url('https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=1920&q=80') center/cover;
+            opacity: 0.4;
+        }
+
+        .hero-content {
+            position: relative;
+            text-align: center;
+            color: var(--white);
+            max-width: 800px;
+            padding: 0 24px;
+        }
+
+        .hero-subtitle {
+            font-size: 12px;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            margin-bottom: 24px;
+            opacity: 0.8;
+        }
+
+        .hero-title {
+            font-family: var(--font-serif);
+            font-size: 64px;
+            font-weight: 500;
+            line-height: 1.1;
+            margin-bottom: 32px;
+        }
+
+        .hero-btn {
+            display: inline-block;
+            padding: 16px 48px;
+            background: var(--white);
+            color: var(--black);
+            text-decoration: none;
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            transition: all 0.3s;
+        }
+
+        .hero-btn:hover {
+            background: var(--grey-light);
+            transform: translateY(-2px);
+        }
+
+        /* === CATEGORIES === */
+        .categories {
+            padding: 80px 48px;
+            background: var(--white);
+        }
+
+        .section-title {
+            font-family: var(--font-serif);
+            font-size: 32px;
+            font-weight: 500;
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        .category-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .category-card {
+            position: relative;
+            aspect-ratio: 3/4;
+            overflow: hidden;
+            cursor: pointer;
+        }
+
+        .category-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.5s;
+        }
+
+        .category-card:hover img {
+            transform: scale(1.05);
+        }
+
+        .category-card-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            padding: 24px;
+            background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+            color: var(--white);
+        }
+
+        .category-card-title {
+            font-family: var(--font-serif);
+            font-size: 20px;
+            font-weight: 500;
+        }
+
+        /* === FEATURED === */
+        .featured {
+            padding: 80px 48px;
+            background: var(--grey-light);
+        }
+
+        .product-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 32px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .product-card {
+            background: var(--white);
+            cursor: pointer;
+            transition: box-shadow 0.3s;
+        }
+
+        .product-card:hover {
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .product-card-image {
+            aspect-ratio: 3/4;
+            background: var(--grey-medium);
+            overflow: hidden;
+        }
+
+        .product-card-image img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.5s;
+        }
+
+        .product-card:hover .product-card-image img {
+            transform: scale(1.05);
+        }
+
+        .product-card-info {
+            padding: 16px;
+        }
+
+        .product-card-brand {
+            font-size: 10px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: var(--grey-text);
+            margin-bottom: 4px;
+        }
+
+        .product-card-name {
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }
+
+        .product-card-price {
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        /* === FOOTER === */
+        .footer {
+            background: var(--black);
+            color: var(--white);
+            padding: 64px 48px;
+            text-align: center;
+        }
+
+        .footer-logo {
+            font-family: var(--font-serif);
+            font-size: 24px;
+            letter-spacing: 6px;
+            margin-bottom: 24px;
+        }
+
+        .footer-text {
+            font-size: 13px;
+            opacity: 0.6;
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+
+            .category-grid,
+            .product-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 768px) {
+            .nav {
+                display: none;
+            }
+
+            .hero-title {
+                font-size: 36px;
+            }
+
+            .category-grid,
+            .product-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="logo">Beymen</div>
+        <nav class="nav">
+            <a href="#">Kadın</a>
+            <a href="#">Erkek</a>
+            <a href="#">Çocuk</a>
+            <a href="#">Ev & Yaşam</a>
+            <a href="#">Markalar</a>
+        </nav>
+        <div class="header-icons">
+            <svg viewBox="0 0 24 24">
+                <path
+                    d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 001.48-5.34c-.47-2.78-2.79-5-5.59-5.34a6.505 6.505 0 00-7.27 7.27c.34 2.8 2.56 5.12 5.34 5.59a6.5 6.5 0 005.34-1.48l.27.28v.79l4.25 4.25c.41.41 1.08.41 1.49 0 .41-.41.41-1.08 0-1.49L15.5 14zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" />
+            </svg>
+            <svg viewBox="0 0 24 24">
+                <path
+                    d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+            </svg>
+            <svg viewBox="0 0 24 24">
+                <path
+                    d="M7 18c-1.1 0-1.99.9-1.99 2S5.9 22 7 22s2-.9 2-2-.9-2-2-2zM1 2v2h2l3.6 7.59-1.35 2.45c-.16.28-.25.61-.25.96 0 1.1.9 2 2 2h12v-2H7.42c-.14 0-.25-.11-.25-.25l.03-.12.9-1.63h7.45c.75 0 1.41-.41 1.75-1.03l3.58-6.49c.08-.14.12-.31.12-.48 0-.55-.45-1-1-1H5.21l-.94-2H1zm16 16c-1.1 0-1.99.9-1.99 2s.89 2 1.99 2 2-.9 2-2-.9-2-2-2z" />
+            </svg>
+        </div>
+    </header>
+
+    <!-- Hero -->
+    <section class="hero">
+        <div class="hero-content">
+            <p class="hero-subtitle">Yeni Sezon 2026</p>
+            <h1 class="hero-title">Tarzınızı<br>Keşfedin</h1>
+            <a href="#" class="hero-btn">Koleksiyonu Keşfet</a>
+        </div>
+    </section>
+
+    <!-- Categories -->
+    <section class="categories">
+        <h2 class="section-title">Kategoriler</h2>
+        <div class="category-grid">
+            <div class="category-card">
+                <img src="https://images.unsplash.com/photo-1617127365659-c47fa864d8bc?w=600&q=80" alt="Erkek">
+                <div class="category-card-overlay">
+                    <div class="category-card-title">Erkek</div>
+                </div>
+            </div>
+            <div class="category-card">
+                <img src="https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?w=600&q=80" alt="Kadın">
+                <div class="category-card-overlay">
+                    <div class="category-card-title">Kadın</div>
+                </div>
+            </div>
+            <div class="category-card">
+                <img src="https://images.unsplash.com/photo-1503342217505-b0a15ec3261c?w=600&q=80" alt="Aksesuar">
+                <div class="category-card-overlay">
+                    <div class="category-card-title">Aksesuar</div>
+                </div>
+            </div>
+            <div class="category-card">
+                <img src="https://images.unsplash.com/photo-1556906781-9a412961c28c?w=600&q=80" alt="Ayakkabı">
+                <div class="category-card-overlay">
+                    <div class="category-card-title">Ayakkabı</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Featured Products -->
+    <section class="featured">
+        <h2 class="section-title">Öne Çıkanlar</h2>
+        <div class="product-grid">
+            <div class="product-card">
+                <div class="product-card-image">
+                    <img src="https://images.unsplash.com/photo-1602810318383-e386cc2a3ccf?w=600&q=80" alt="Gömlek">
+                </div>
+                <div class="product-card-info">
+                    <div class="product-card-brand">Beymen Club</div>
+                    <div class="product-card-name">Slim Fit Klasik Yaka Gömlek</div>
+                    <div class="product-card-price">2.499 TL</div>
+                </div>
+            </div>
+            <div class="product-card">
+                <div class="product-card-image">
+                    <img src="https://images.unsplash.com/photo-1594938298603-c8148c4dae35?w=600&q=80" alt="Ceket">
+                </div>
+                <div class="product-card-info">
+                    <div class="product-card-brand">Network</div>
+                    <div class="product-card-name">Slim Fit Blazer Ceket</div>
+                    <div class="product-card-price">7.999 TL</div>
+                </div>
+            </div>
+            <div class="product-card">
+                <div class="product-card-image">
+                    <img src="https://images.unsplash.com/photo-1620799140408-edc6dcb6d633?w=600&q=80" alt="Gömlek">
+                </div>
+                <div class="product-card-info">
+                    <div class="product-card-brand">Beymen Club</div>
+                    <div class="product-card-name">Regular Fit Oxford Gömlek</div>
+                    <div class="product-card-price">1.899 TL</div>
+                </div>
+            </div>
+            <div class="product-card">
+                <div class="product-card-image">
+                    <img src="https://images.unsplash.com/photo-1593030761757-71fae45fa0e7?w=600&q=80" alt="Polo">
+                </div>
+                <div class="product-card-info">
+                    <div class="product-card-brand">Beymen Club</div>
+                    <div class="product-card-name">Slim Fit Polo Yaka T-Shirt</div>
+                    <div class="product-card-price">1.299 TL</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="footer-logo">BEYMEN</div>
+        <p class="footer-text">© 2026 Beymen. Tüm hakları saklıdır.</p>
+    </footer>
+
+    <!-- AI SHOPPER WIDGET - Self-contained, paste this on any page -->
+    <script src="fit-engine-widget.js"></script>
+    <script>
+        BeymenAI.init({
+            apiUrl: 'http://localhost:8000',
+            apiKey: 'test-api-key'
+        });
+    </script>
+</body>
+
+</html>
