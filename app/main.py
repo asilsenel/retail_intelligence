@@ -4,7 +4,7 @@ FitEngine API - Main Application Entry Point
 A B2B SaaS API for size recommendations, designed to help
 e-commerce clothing brands reduce return rates.
 """
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 import time
 import os
 import json
+import base64
 import httpx
 
 from app.config import settings
@@ -523,6 +524,175 @@ async def get_inventory():
 
 
 # =============================================================================
+# IMAGE ANALYSIS ENDPOINT (GPT-4o Vision)
+# =============================================================================
+
+VISION_SYSTEM_PROMPT = """Sen bir Moda Eşleştirme Uzmanısın. Kullanıcının yüklediği fotoğrafı analiz et.
+
+**MEVCUT ENVANTER:**
+{inventory}
+
+**GÖREV:**
+1. Fotoğraftaki kıyafeti analiz et (renk, stil, tür).
+2. Envanterden en çok benzeyen ürünü bul.
+3. Eğer uygun ürün varsa, onun ID'sini döndür.
+4. Eğer hiçbir ürün uymuyorsa, bunu belirt.
+
+**JSON ÇIKTI FORMATI:**
+{{
+    "message": "Fotoğraftaki ürünle ilgili yorumun ve önerdiğin ürün hakkında açıklama",
+    "matched_product_id": "eşleşen ürünün id'si veya null",
+    "confidence": "high/medium/low/none"
+}}
+
+Sadece JSON döndür, başka bir şey yazma."""
+
+
+@app.post("/api/v1/analyze-image", tags=["AI Vision"])
+async def analyze_image(file: UploadFile = File(...)):
+    """
+    Analyze an uploaded image and find matching products.
+    
+    Uses GPT-4o Vision to identify clothing items and match
+    them against our inventory.
+    
+    **Supported formats:** JPEG, PNG, WebP
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    
+    if not api_key:
+        return {
+            "message": "Görsel analizi şu anda kullanılamıyor. Lütfen metin ile arama yapın.",
+            "main_product": None,
+            "combo_product": None
+        }
+    
+    # Validate file type
+    allowed_types = ["image/jpeg", "image/png", "image/webp", "image/jpg"]
+    if file.content_type not in allowed_types:
+        return {
+            "message": "Desteklenmeyen dosya formatı. Lütfen JPEG, PNG veya WebP yükleyin.",
+            "main_product": None,
+            "combo_product": None
+        }
+    
+    try:
+        # Read and encode image
+        image_data = await file.read()
+        base64_image = base64.b64encode(image_data).decode("utf-8")
+        
+        # Determine media type
+        media_type = file.content_type
+        
+        # Build system prompt with inventory
+        system_prompt = VISION_SYSTEM_PROMPT.format(inventory=get_inventory_for_prompt())
+        
+        # Call GPT-4o Vision
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-4o",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "Bu fotoğraftaki kıyafeti analiz et ve envanterden en uygun ürünü öner."
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{base64_image}",
+                                        "detail": "low"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "max_tokens": 500,
+                    "temperature": 0.5
+                },
+                timeout=60.0
+            )
+            
+            if response.status_code != 200:
+                print(f"Vision API error: {response.status_code} - {response.text}")
+                return {
+                    "message": "Görsel analizi sırasında bir hata oluştu. Lütfen tekrar deneyin.",
+                    "main_product": None,
+                    "combo_product": None
+                }
+            
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            
+            # Parse JSON response
+            try:
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0]
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0]
+                
+                result = json.loads(content.strip())
+            except json.JSONDecodeError:
+                result = {"message": content, "matched_product_id": None, "confidence": "none"}
+        
+        # Build response with product details
+        main_product = None
+        combo_product = None
+        
+        if result.get("matched_product_id"):
+            product = find_product_by_id(result["matched_product_id"])
+            if product:
+                main_product = {
+                    "id": product["id"],
+                    "name": product["name"],
+                    "brand": product["brand"],
+                    "price": product["price"],
+                    "fit_type": product["fit_type"],
+                    "color": product["color"],
+                    "category": product.get("category", ""),
+                    "image_url": get_product_image(product)
+                }
+                
+                # Get combo suggestion
+                combo = get_combo_suggestion(product)
+                if combo:
+                    combo_product = {
+                        "id": combo["id"],
+                        "name": combo["name"],
+                        "brand": combo["brand"],
+                        "price": combo["price"],
+                        "fit_type": combo["fit_type"],
+                        "color": combo["color"],
+                        "category": combo.get("category", ""),
+                        "image_url": get_product_image(combo)
+                    }
+        
+        return {
+            "message": result.get("message", "Görsel analizi tamamlandı."),
+            "main_product": main_product,
+            "combo_product": combo_product,
+            "confidence": result.get("confidence", "medium")
+        }
+        
+    except Exception as e:
+        print(f"Vision API exception: {e}")
+        return {
+            "message": "Görsel işlenirken bir hata oluştu. Lütfen tekrar deneyin.",
+            "main_product": None,
+            "combo_product": None
+        }
+
+
+# =============================================================================
 # HEALTH & ROOT ENDPOINTS
 # =============================================================================
 
@@ -531,7 +701,7 @@ async def root():
     """API root - returns basic info and health status."""
     return {
         "name": "FitEngine API",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "status": "healthy",
         "docs": "/docs",
         "endpoints": {
@@ -539,7 +709,8 @@ async def root():
             "recommend": "POST /api/v1/recommend",
             "products": "GET /api/v1/products",
             "chat": "POST /api/v1/chat",
-            "inventory": "GET /api/v1/inventory"
+            "inventory": "GET /api/v1/inventory",
+            "analyze_image": "POST /api/v1/analyze-image"
         }
     }
 

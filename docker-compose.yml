@@ -1,0 +1,47 @@
+# =============================================================================
+# FitEngine API - Docker Compose Configuration
+#
+# Development setup with hot-reload enabled via volume mounting.
+# =============================================================================
+
+version: "3.9"
+
+services:
+  fitengine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fitengine-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount current directory for live code editing (hot reload)
+      - .:/app
+      # Prevent overwriting node_modules or venvs if they exist
+      - /app/__pycache__
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - ENVIRONMENT=development
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+# Optional: Add database service later
+# services:
+#   db:
+#     image: postgres:15-alpine
+#     environment:
+#       POSTGRES_DB: fitengine
+#       POSTGRES_USER: fitengine
+#       POSTGRES_PASSWORD: ${DB_PASSWORD}
+#     volumes:
+#       - postgres_data:/var/lib/postgresql/data
+#
+# volumes:
+#   postgres_data:

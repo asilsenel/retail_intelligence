@@ -1,10 +1,34 @@
+# =============================================================================
+# FitEngine API - Python Dependencies
+# =============================================================================
+
+# Core Framework
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 pydantic==2.5.3
 pydantic-settings==2.1.0
+
+# Database
 sqlalchemy==2.0.25
 asyncpg==0.29.0
+
+# HTTP Client
+httpx==0.26.0
+
+# Environment & Config
 python-dotenv==1.0.0
+
+# Data Processing
 numpy==1.26.3
 pandas==2.1.4
-httpx==0.26.0
+
+# Web Scraping (Playwright for headless browser)
+playwright==1.49.0
+beautifulsoup4==4.12.3
+lxml==5.1.0
+
+# File Upload Support
+python-multipart==0.0.6
+
+# OpenAI API (for Chat & Vision)
+openai==1.12.0

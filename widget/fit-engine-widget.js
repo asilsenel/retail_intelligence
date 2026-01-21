@@ -4,7 +4,7 @@
  * Self-contained overlay widget (Intercom-style).
  * Paste this script on any page to enable the AI assistant.
  * 
- * v4.0 - Accordion Combo, Smart Size Flow, Reset Chat
+ * v5.0 - Fixed State Machine + Image Upload & Analysis
  */
 
 (function (window, document) {
@@ -19,16 +19,20 @@
         apiKey: 'test-api-key'
     };
 
-    // State
+    // =========================================================================
+    // GLOBAL STATE
+    // =========================================================================
+
     let isOpen = false;
     let messages = [];
-    let currentProductId = null;
+    let currentActiveProductId = null;  // CRITICAL: Track which product awaits size calc
     let userHeight = null;
     let userWeight = null;
-    let productsCache = {}; // Store product details by ID
+    let productsCache = {};
+    let cardCounter = 0;  // Unique ID for each card
 
     // =========================================================================
-    // STYLES (Injected via JS)
+    // STYLES
     // =========================================================================
 
     const STYLES = `
@@ -73,7 +77,7 @@
             bottom: 100px;
             right: 24px;
             width: 380px;
-            height: 560px;
+            height: 580px;
             background: #FFFFFF;
             border-radius: 16px;
             box-shadow: 0 12px 48px rgba(0,0,0,0.2);
@@ -184,14 +188,8 @@
             gap: 12px;
         }
         
-        .bw-body::-webkit-scrollbar {
-            width: 4px;
-        }
-        
-        .bw-body::-webkit-scrollbar-thumb {
-            background: #CCC;
-            border-radius: 2px;
-        }
+        .bw-body::-webkit-scrollbar { width: 4px; }
+        .bw-body::-webkit-scrollbar-thumb { background: #CCC; border-radius: 2px; }
         
         /* Messages */
         .bw-msg {
@@ -205,9 +203,7 @@
             to { opacity: 1; transform: translateY(0); }
         }
         
-        .bw-msg.user {
-            flex-direction: row-reverse;
-        }
+        .bw-msg.user { flex-direction: row-reverse; }
         
         .bw-msg-avatar {
             width: 28px;
@@ -220,22 +216,13 @@
             flex-shrink: 0;
         }
         
-        .bw-msg.user .bw-msg-avatar {
-            background: #DDD;
-        }
+        .bw-msg.user .bw-msg-avatar { background: #DDD; }
         
-        .bw-msg-avatar svg {
-            width: 14px;
-            height: 14px;
-            fill: #FFF;
-        }
-        
-        .bw-msg.user .bw-msg-avatar svg {
-            fill: #666;
-        }
+        .bw-msg-avatar svg { width: 14px; height: 14px; fill: #FFF; }
+        .bw-msg.user .bw-msg-avatar svg { fill: #666; }
         
         .bw-bubble {
-            max-width: 260px;
+            max-width: 270px;
             padding: 12px 14px;
             background: #FFFFFF;
             border-radius: 14px;
@@ -254,6 +241,20 @@
             border-top-right-radius: 4px;
         }
         
+        /* Image Preview */
+        .bw-image-preview {
+            max-width: 200px;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        
+        .bw-image-preview img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        
         /* Product Card */
         .bw-card {
             background: #FFFFFF;
@@ -269,9 +270,7 @@
             object-fit: cover;
         }
         
-        .bw-card-body {
-            padding: 14px;
-        }
+        .bw-card-body { padding: 14px; }
         
         .bw-card-brand {
             font-size: 9px;
@@ -304,6 +303,46 @@
             gap: 8px;
         }
         
+        /* Size Result Inline */
+        .bw-card-size-result {
+            background: linear-gradient(135deg, #000 0%, #1a1a1a 100%);
+            color: #FFF;
+            padding: 14px;
+            border-radius: 8px;
+            text-align: center;
+            margin-top: 10px;
+            animation: bwFadeIn 0.4s ease;
+        }
+        
+        @keyframes bwFadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        
+        .bw-card-size-label {
+            font-size: 9px;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            opacity: 0.7;
+        }
+        
+        .bw-card-size-value {
+            font-family: 'Playfair Display', serif;
+            font-size: 32px;
+            font-weight: 600;
+            margin: 4px 0;
+        }
+        
+        .bw-card-size-conf {
+            font-size: 12px;
+            opacity: 0.9;
+        }
+        
+        .bw-card-size-conf.high { color: #4ade80; }
+        .bw-card-size-conf.medium { color: #fbbf24; }
+        .bw-card-size-conf.low { color: #f87171; }
+        
+        /* Buttons */
         .bw-btn {
             width: 100%;
             padding: 11px 14px;
@@ -320,27 +359,13 @@
             gap: 6px;
         }
         
-        .bw-btn-primary {
-            background: #000;
-            color: #FFF;
-        }
+        .bw-btn-primary { background: #000; color: #FFF; }
+        .bw-btn-primary:hover { background: #222; }
+        .bw-btn-primary:disabled { background: #999; cursor: not-allowed; }
         
-        .bw-btn-primary:hover {
-            background: #222;
-        }
-        
-        .bw-btn-secondary {
-            background: #F0F0F0;
-            color: #333;
-        }
-        
-        .bw-btn-secondary:hover {
-            background: #E5E5E5;
-        }
-        
-        .bw-btn-secondary.active {
-            background: #E0E0E0;
-        }
+        .bw-btn-secondary { background: #F0F0F0; color: #333; }
+        .bw-btn-secondary:hover { background: #E5E5E5; }
+        .bw-btn-secondary.active { background: #E0E0E0; }
         
         /* Combo Accordion */
         .bw-combo-container {
@@ -365,9 +390,6 @@
             text-transform: uppercase;
             color: #666;
             margin-bottom: 10px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
         }
         
         .bw-combo-card {
@@ -399,7 +421,6 @@
             font-weight: 500;
             color: #000;
             margin-bottom: 4px;
-            line-height: 1.3;
         }
         
         .bw-combo-price {
@@ -421,51 +442,10 @@
             align-self: flex-start;
         }
         
-        .bw-combo-btn:hover {
-            background: #222;
-        }
-        
-        /* Size Result */
-        .bw-size-result {
-            background: linear-gradient(135deg, #000 0%, #1a1a1a 100%);
-            color: #FFF;
-            padding: 20px;
-            border-radius: 12px;
-            text-align: center;
-            max-width: 220px;
-            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-        }
-        
-        .bw-size-result-label {
-            font-size: 10px;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            opacity: 0.7;
-            margin-bottom: 6px;
-        }
-        
-        .bw-size-result-size {
-            font-family: 'Playfair Display', serif;
-            font-size: 48px;
-            font-weight: 600;
-            margin-bottom: 6px;
-        }
-        
-        .bw-size-result-conf {
-            font-size: 13px;
-            opacity: 0.9;
-        }
-        
-        .bw-size-result-conf.high { color: #4ade80; }
-        .bw-size-result-conf.medium { color: #fbbf24; }
-        .bw-size-result-conf.low { color: #f87171; }
+        .bw-combo-btn:hover { background: #222; }
         
         /* Typing */
-        .bw-typing {
-            display: flex;
-            gap: 4px;
-            padding: 4px 0;
-        }
+        .bw-typing { display: flex; gap: 4px; padding: 4px 0; }
         
         .bw-typing-dot {
             width: 6px;
@@ -493,11 +473,27 @@
         .bw-input-wrap {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 8px;
             background: #F5F5F5;
             border-radius: 24px;
-            padding: 4px 4px 4px 16px;
+            padding: 4px 4px 4px 6px;
         }
+        
+        .bw-upload-btn {
+            width: 32px;
+            height: 32px;
+            background: transparent;
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+        
+        .bw-upload-btn:hover { background: rgba(0,0,0,0.05); }
+        .bw-upload-btn svg { width: 18px; height: 18px; fill: #666; }
         
         .bw-input {
             flex: 1;
@@ -507,11 +503,10 @@
             font-size: 13px;
             color: #1a1a1a;
             outline: none;
+            min-width: 0;
         }
         
-        .bw-input::placeholder {
-            color: #999;
-        }
+        .bw-input::placeholder { color: #999; }
         
         .bw-send {
             width: 36px;
@@ -524,17 +519,13 @@
             align-items: center;
             justify-content: center;
             transition: background 0.2s;
+            flex-shrink: 0;
         }
         
-        .bw-send:hover {
-            background: #222;
-        }
+        .bw-send:hover { background: #222; }
+        .bw-send svg { width: 16px; height: 16px; fill: #FFF; }
         
-        .bw-send svg {
-            width: 16px;
-            height: 16px;
-            fill: #FFF;
-        }
+        #bw-file-input { display: none; }
     `;
 
     // =========================================================================
@@ -550,19 +541,14 @@
     }
 
     function createWidget() {
-        // FAB Button
+        // FAB
         const fab = document.createElement('button');
         fab.id = 'beymen-widget-fab';
-        fab.innerHTML = `
-            <svg viewBox="0 0 24 24">
-                <path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/>
-                <path d="M7 9h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2z"/>
-            </svg>
-        `;
+        fab.innerHTML = `<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/><path d="M7 9h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2z"/></svg>`;
         fab.onclick = toggleChat;
         document.body.appendChild(fab);
 
-        // Chat Window
+        // Window
         const win = document.createElement('div');
         win.id = 'beymen-widget-window';
         win.innerHTML = `
@@ -583,6 +569,10 @@
             <div class="bw-body" id="bw-messages"></div>
             <div class="bw-footer">
                 <div class="bw-input-wrap">
+                    <button class="bw-upload-btn" id="bw-upload-btn" title="Fotoğraf Yükle">
+                        <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
+                    </button>
+                    <input type="file" id="bw-file-input" accept="image/jpeg,image/png,image/webp">
                     <input type="text" class="bw-input" id="bw-input" placeholder="Mesajınızı yazın...">
                     <button class="bw-send" id="bw-send">
                         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
@@ -598,10 +588,14 @@
             if (e.key === 'Enter') sendMessage();
         };
         document.getElementById('bw-reset').onclick = resetChat;
+        document.getElementById('bw-upload-btn').onclick = () => {
+            document.getElementById('bw-file-input').click();
+        };
+        document.getElementById('bw-file-input').onchange = handleFileUpload;
     }
 
     // =========================================================================
-    // CHAT LOGIC
+    // CHAT CORE
     // =========================================================================
 
     function toggleChat() {
@@ -612,35 +606,27 @@
         fab.classList.toggle('open', isOpen);
         win.classList.toggle('open', isOpen);
 
-        // Update FAB icon
         fab.innerHTML = isOpen
             ? `<svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>`
             : `<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/><path d="M7 9h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2z"/></svg>`;
 
-        // Greeting
         if (isOpen && messages.length === 0) {
-            setTimeout(() => addBotMessage("Beymen'e hoş geldiniz. Bugün size nasıl yardımcı olabilirim?\n\n<em>(Örn: \"Gömlek arıyorum\", \"Ceket var mı?\", \"Kombin öner\")</em>"), 400);
+            setTimeout(() => addBotMessage("Beymen'e hoş geldiniz! 👋\n\nSize nasıl yardımcı olabilirim?\n\n<em>💬 \"Ceket arıyorum\"\n📷 Fotoğraf yükleyebilirsiniz</em>"), 400);
         }
 
-        if (isOpen) {
-            setTimeout(() => document.getElementById('bw-input')?.focus(), 300);
-        }
+        if (isOpen) setTimeout(() => document.getElementById('bw-input')?.focus(), 300);
     }
 
     function resetChat() {
-        // Clear state
         messages = [];
-        currentProductId = null;
+        currentActiveProductId = null;
         userHeight = null;
         userWeight = null;
         productsCache = {};
+        cardCounter = 0;
 
-        // Clear UI
-        const container = document.getElementById('bw-messages');
-        container.innerHTML = '';
-
-        // Show greeting
-        setTimeout(() => addBotMessage("Beymen'e hoş geldiniz. Bugün size nasıl yardımcı olabilirim?\n\n<em>(Örn: \"Gömlek arıyorum\", \"Ceket var mı?\", \"Kombin öner\")</em>"), 300);
+        document.getElementById('bw-messages').innerHTML = '';
+        setTimeout(() => addBotMessage("Beymen'e hoş geldiniz! 👋\n\nSize nasıl yardımcı olabilirim?\n\n<em>💬 \"Ceket arıyorum\"\n📷 Fotoğraf yükleyebilirsiniz</em>"), 300);
     }
 
     function addBotMessage(html, isCard = false) {
@@ -660,21 +646,25 @@
             ? '<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>'
             : '<path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z"/>';
 
-        if (isCard) {
-            msg.innerHTML = `
-                <div class="bw-msg-avatar"><svg viewBox="0 0 24 24">${avatarSvg}</svg></div>
-                ${content}
-            `;
-        } else {
-            msg.innerHTML = `
-                <div class="bw-msg-avatar"><svg viewBox="0 0 24 24">${avatarSvg}</svg></div>
-                <div class="bw-bubble">${content}</div>
-            `;
-        }
+        msg.innerHTML = isCard
+            ? `<div class="bw-msg-avatar"><svg viewBox="0 0 24 24">${avatarSvg}</svg></div>${content}`
+            : `<div class="bw-msg-avatar"><svg viewBox="0 0 24 24">${avatarSvg}</svg></div><div class="bw-bubble">${content}</div>`;
 
         container.appendChild(msg);
         container.scrollTop = container.scrollHeight;
         messages.push({ content, isUser });
+    }
+
+    function addImagePreview(imageUrl) {
+        const container = document.getElementById('bw-messages');
+        const msg = document.createElement('div');
+        msg.className = 'bw-msg user';
+        msg.innerHTML = `
+            <div class="bw-msg-avatar"><svg viewBox="0 0 24 24"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg></div>
+            <div class="bw-image-preview"><img src="${imageUrl}" alt="Uploaded"></div>
+        `;
+        container.appendChild(msg);
+        container.scrollTop = container.scrollHeight;
     }
 
     function showTyping() {
@@ -705,24 +695,23 @@
 
         addUserMessage(text);
         input.value = '';
-
         processInput(text);
     }
 
     function processInput(text) {
-        // Check for measurements in text
+        // Check for measurements
         const measurements = parseMeasurements(text);
 
         if (measurements) {
             userHeight = measurements.height;
             userWeight = measurements.weight;
 
-            // If we have a pending product, calculate size
-            if (currentProductId) {
-                addBotMessage(`Boy: ${userHeight}cm, Kilo: ${userWeight}kg olarak kaydettim. Hesaplıyorum...`);
-                getSizeRecommendation(currentProductId);
+            if (currentActiveProductId) {
+                // We have a pending product - calculate immediately
+                addBotMessage(`✓ ${userHeight}cm / ${userWeight}kg kaydedildi. Hesaplıyorum...`);
+                getSizeRecommendation(currentActiveProductId);
             } else {
-                addBotMessage(`Ölçülerinizi kaydettim (${userHeight}cm / ${userWeight}kg). Şimdi bir ürün seçin, bedeninizi hemen hesaplayalım!`);
+                addBotMessage(`Ölçülerinizi kaydettim (${userHeight}cm / ${userWeight}kg). 👍\n\nŞimdi bir ürün seçin, bedeninizi hemen hesaplayalım!`);
             }
             return;
         }
@@ -732,7 +721,6 @@
     }
 
     function parseMeasurements(text) {
-        // Match patterns like "180 80", "180cm 80kg", "boyum 180 kilom 80"
         const patterns = [
             /(\d{2,3})\s*(?:cm)?\s+(\d{2,3})\s*(?:kg)?/i,
             /boy[um]*\s*[:\s]*(\d{2,3}).*?kilo[m]*\s*[:\s]*(\d{2,3})/i,
@@ -745,19 +733,8 @@
                 let num1 = parseInt(match[1]);
                 let num2 = parseInt(match[2]);
 
-                // Determine which is height and which is weight
-                let height, weight;
-                if (num1 > 100 && num1 <= 220) {
-                    height = num1;
-                    weight = num2;
-                } else if (num2 > 100 && num2 <= 220) {
-                    height = num2;
-                    weight = num1;
-                } else {
-                    // Assume larger is height
-                    height = Math.max(num1, num2);
-                    weight = Math.min(num1, num2);
-                }
+                let height = num1 > 100 ? num1 : num2;
+                let weight = num1 > 100 ? num2 : num1;
 
                 if (height >= 140 && height <= 220 && weight >= 35 && weight <= 180) {
                     return { height, weight };
@@ -765,6 +742,50 @@
             }
         }
         return null;
+    }
+
+    // =========================================================================
+    // FILE UPLOAD
+    // =========================================================================
+
+    async function handleFileUpload(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        // Show preview
+        const reader = new FileReader();
+        reader.onload = (ev) => addImagePreview(ev.target.result);
+        reader.readAsDataURL(file);
+
+        // Reset input
+        e.target.value = '';
+
+        // Send to API
+        showTyping();
+        addBotMessage("📸 Fotoğrafı analiz ediyorum...");
+
+        try {
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const response = await fetch(`${CONFIG.apiUrl}/api/v1/analyze-image`, {
+                method: 'POST',
+                headers: { 'X-API-Key': CONFIG.apiKey },
+                body: formData
+            });
+
+            hideTyping();
+
+            if (!response.ok) throw new Error('Upload failed');
+
+            const data = await response.json();
+            handleChatResponse(data);
+
+        } catch (error) {
+            hideTyping();
+            addBotMessage("Fotoğraf yüklenirken bir sorun oluştu. Lütfen tekrar deneyin.");
+            console.error('Upload error:', error);
+        }
     }
 
     // =========================================================================
@@ -785,33 +806,25 @@
             });
 
             hideTyping();
-
-            if (!response.ok) {
-                throw new Error('API Error');
-            }
+            if (!response.ok) throw new Error('API Error');
 
             const data = await response.json();
             handleChatResponse(data);
 
         } catch (error) {
             hideTyping();
-            addBotMessage("Üzgünüm, şu anda bir sorun yaşıyorum. Lütfen tekrar deneyin.");
+            addBotMessage("Üzgünüm, bir sorun oluştu. Lütfen tekrar deneyin.");
             console.error('Chat API Error:', error);
         }
     }
 
     function handleChatResponse(data) {
-        // Add text message
-        if (data.message) {
-            addBotMessage(data.message);
-        }
+        if (data.message) addBotMessage(data.message);
 
-        // If we have products, show the card
         if (data.main_product) {
             const main = data.main_product;
             const combo = data.combo_product;
 
-            // Cache products
             productsCache[main.id] = main;
             if (combo) productsCache[combo.id] = combo;
 
@@ -823,87 +836,82 @@
     }
 
     function buildProductCard(main, combo) {
+        const cardId = `card-${++cardCounter}`;
+
         let html = `
-            <div class="bw-card">
+            <div class="bw-card" id="${cardId}">
                 <img src="${main.image_url}" alt="${main.name}" class="bw-card-img">
                 <div class="bw-card-body">
                     <div class="bw-card-brand">${main.brand}</div>
                     <div class="bw-card-name">${main.name}</div>
                     <div class="bw-card-price">${main.price}</div>
                     <div class="bw-card-actions">
-                        <button class="bw-btn bw-btn-primary" onclick="BeymenAI.triggerSizeCheck('${main.id}')">
+                        <button class="bw-btn bw-btn-primary" id="btn-${cardId}" onclick="BeymenAI.triggerSizeCheck('${main.id}', '${cardId}')">
                             📏 Bedenimi Bul
                         </button>
         `;
 
         if (combo) {
             html += `
-                        <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.toggleCombo('${main.id}')">
+                        <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.toggleCombo('${cardId}')">
                             ✨ Kombini Gör
                         </button>
                     </div>
-                    <div class="bw-combo-container" id="combo-${main.id}">
+                    <div id="size-result-${cardId}"></div>
+                    <div class="bw-combo-container" id="combo-${cardId}">
                         <div class="bw-combo-label">✨ Kombin Önerisi</div>
                         <div class="bw-combo-card">
                             <img src="${combo.image_url}" alt="${combo.name}" class="bw-combo-img">
                             <div class="bw-combo-info">
                                 <div class="bw-combo-name">${combo.name}</div>
                                 <div class="bw-combo-price">${combo.price}</div>
-                                <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}')">📏 Bedenini Bul</button>
+                                <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}', '${cardId}')">📏 Bedenini Bul</button>
                             </div>
                         </div>
                     </div>
             `;
         } else {
-            html += `</div>`;
+            html += `
+                    </div>
+                    <div id="size-result-${cardId}"></div>
+            `;
         }
 
-        html += `
-                </div>
-            </div>
-        `;
-
+        html += `</div></div>`;
         return html;
     }
 
     // =========================================================================
-    // SIZE CHECK FLOW
+    // SIZE CHECK - FIXED STATE MACHINE
     // =========================================================================
 
-    function triggerSizeCheck(productId) {
-        currentProductId = productId;
+    function triggerSizeCheck(productId, cardId) {
+        // Set active product
+        currentActiveProductId = productId;
         const product = productsCache[productId];
         const productName = product ? product.name : 'bu ürün';
 
         if (userHeight && userWeight) {
-            // We have measurements, calculate directly
-            addBotMessage(`<strong>${productName}</strong> için bedeninizi hesaplıyorum...`);
-            getSizeRecommendation(productId);
+            // Data exists - calculate immediately
+            const btn = document.getElementById(`btn-${cardId}`);
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '⏳ Hesaplanıyor...';
+            }
+            getSizeRecommendation(productId, cardId);
         } else {
-            // Ask for measurements
+            // Data missing - ask for it
             addBotMessage(`<strong>${productName}</strong> için beden hesaplayabilmem için boy ve kilonuzu yazar mısınız?\n\n<em>Örn: "180 80" veya "Boyum 180, kilom 80"</em>`);
             document.getElementById('bw-input')?.focus();
         }
     }
 
-    function toggleCombo(productId) {
-        const container = document.getElementById(`combo-${productId}`);
-        if (container) {
-            container.classList.toggle('open');
-
-            // Update button state
-            const buttons = document.querySelectorAll('.bw-btn-secondary');
-            buttons.forEach(btn => {
-                if (btn.onclick.toString().includes(productId)) {
-                    btn.classList.toggle('active', container.classList.contains('open'));
-                }
-            });
-        }
+    function toggleCombo(cardId) {
+        const container = document.getElementById(`combo-${cardId}`);
+        if (container) container.classList.toggle('open');
     }
 
-    async function getSizeRecommendation(productId) {
-        showTyping();
-
+    async function getSizeRecommendation(productId, cardId) {
         try {
             const response = await fetch(`${CONFIG.apiUrl}/api/v1/recommend`, {
                 method: 'POST',
@@ -920,63 +928,75 @@
                 })
             });
 
-            hideTyping();
-
             if (!response.ok) throw new Error('API Error');
 
             const data = await response.json();
-            displaySizeResult(data);
+            displaySizeResult(data, cardId, productId);
 
         } catch (error) {
-            hideTyping();
-            addBotMessage("Üzgünüm, şu anda beden hesaplayamıyorum. Lütfen tekrar deneyin.");
+            addBotMessage("Beden hesaplanamadı. Lütfen tekrar deneyin.");
             console.error('Size API Error:', error);
+
+            // Re-enable button
+            const btn = document.getElementById(`btn-${cardId}`);
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '📏 Bedenimi Bul';
+            }
+        } finally {
+            currentActiveProductId = null;
         }
     }
 
-    function displaySizeResult(data) {
+    function displaySizeResult(data, cardId, productId) {
         const size = data.recommended_size;
         const confidence = data.confidence_score;
 
-        let confClass = 'high';
-        if (confidence < 80) confClass = 'medium';
-        if (confidence < 60) confClass = 'low';
+        let confClass = confidence >= 80 ? 'high' : confidence >= 60 ? 'medium' : 'low';
 
-        const resultHtml = `
-            <div class="bw-size-result">
-                <div class="bw-size-result-label">Önerilen Beden</div>
-                <div class="bw-size-result-size">${size}</div>
-                <div class="bw-size-result-conf ${confClass}">%${confidence} Uyum</div>
-            </div>
-        `;
+        // Find the result container within the card
+        const resultContainer = document.getElementById(`size-result-${cardId}`);
 
-        addBotMessage(resultHtml, true);
+        if (resultContainer) {
+            resultContainer.innerHTML = `
+                <div class="bw-card-size-result">
+                    <div class="bw-card-size-label">Önerilen Beden</div>
+                    <div class="bw-card-size-value">${size}</div>
+                    <div class="bw-card-size-conf ${confClass}">%${confidence} Uyum</div>
+                </div>
+            `;
+        }
 
+        // Update button
+        const btn = document.getElementById(`btn-${cardId}`);
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = `✓ ${size} Beden`;
+            btn.classList.add('active');
+        }
+
+        // Add follow-up message
+        const product = productsCache[productId];
         setTimeout(() => {
-            let note = data.fit_description_tr || data.fit_description || 'Bu beden size uygun görünüyor.';
+            let msg = `<strong>${product?.name || 'Bu ürün'}</strong> için <strong>${size}</strong> beden öneriyorum.`;
             if (data.alternative_size) {
-                note += `\n\nAlternatif: <strong>${data.alternative_size}</strong> beden de deneyebilirsiniz.`;
+                msg += `\n\nAlternatif: <strong>${data.alternative_size}</strong> de deneyebilirsiniz.`;
             }
-            addBotMessage(note);
+            addBotMessage(msg);
         }, 500);
-
-        setTimeout(() => {
-            addBotMessage("Başka bir ürün veya sorunuz var mı?");
-        }, 1000);
     }
 
     // =========================================================================
-    // INITIALIZATION
+    // INIT
     // =========================================================================
 
     function init(options = {}) {
         Object.assign(CONFIG, options);
         injectStyles();
         createWidget();
-        console.log('Beymen AI Shopper v4.0 initialized');
+        console.log('Beymen AI Shopper v5.0 initialized');
     }
 
-    // Expose globally
     window.BeymenAI = {
         init,
         toggle: toggleChat,
