@@ -183,8 +183,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Response from chat endpoint."""
     message: str
-    recommended_product: Optional[Dict[str, Any]] = None
-    related_product_id: Optional[str] = None
+    main_product: Optional[Dict[str, Any]] = None
+    combo_product: Optional[Dict[str, Any]] = None
     conversation_id: Optional[str] = None
 
 
@@ -469,29 +469,43 @@ async def chat_with_ai(request: ChatRequest):
     ai_response = await call_openai(request.message)
     
     # Build response with product details
-    recommended_product = None
-    related_product_id = None
+    main_product = None
+    combo_product = None
     
+    # Get main product details
     if ai_response.get("recommended_product_id"):
         product = find_product_by_id(ai_response["recommended_product_id"])
         if product:
-            recommended_product = {
+            main_product = {
                 "id": product["id"],
                 "name": product["name"],
                 "brand": product["brand"],
                 "price": product["price"],
                 "fit_type": product["fit_type"],
                 "color": product["color"],
+                "category": product.get("category", ""),
                 "image_url": get_product_image(product)
             }
     
+    # Get combo product details (full object, not just ID)
     if ai_response.get("related_product_id"):
-        related_product_id = ai_response["related_product_id"]
+        related = find_product_by_id(ai_response["related_product_id"])
+        if related:
+            combo_product = {
+                "id": related["id"],
+                "name": related["name"],
+                "brand": related["brand"],
+                "price": related["price"],
+                "fit_type": related["fit_type"],
+                "color": related["color"],
+                "category": related.get("category", ""),
+                "image_url": get_product_image(related)
+            }
     
     return ChatResponse(
         message=ai_response.get("message", "Özür dilerim, bir sorun oluştu."),
-        recommended_product=recommended_product,
-        related_product_id=related_product_id,
+        main_product=main_product,
+        combo_product=combo_product,
         conversation_id=request.conversation_id
     )
 

@@ -4,7 +4,7 @@
  * Self-contained overlay widget (Intercom-style).
  * Paste this script on any page to enable the AI assistant.
  * 
- * v3.0 - Connected to /api/v1/chat endpoint with combo recommendations
+ * v4.0 - Accordion Combo, Smart Size Flow, Reset Chat
  */
 
 (function (window, document) {
@@ -22,8 +22,10 @@
     // State
     let isOpen = false;
     let messages = [];
-    let currentProduct = null;
-    let awaitingMeasurements = false;
+    let currentProductId = null;
+    let userHeight = null;
+    let userWeight = null;
+    let productsCache = {}; // Store product details by ID
 
     // =========================================================================
     // STYLES (Injected via JS)
@@ -70,10 +72,10 @@
             position: fixed;
             bottom: 100px;
             right: 24px;
-            width: 360px;
-            height: 520px;
+            width: 380px;
+            height: 560px;
             background: #FFFFFF;
-            border-radius: 12px;
+            border-radius: 16px;
             box-shadow: 0 12px 48px rgba(0,0,0,0.2);
             display: flex;
             flex-direction: column;
@@ -96,13 +98,14 @@
                 width: calc(100vw - 24px);
                 right: 12px;
                 left: 12px;
-                height: 70vh;
+                height: 75vh;
             }
         }
         
+        /* Header */
         .bw-header {
             background: #000000;
-            padding: 16px 20px;
+            padding: 14px 16px;
             display: flex;
             align-items: center;
             gap: 12px;
@@ -116,6 +119,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            flex-shrink: 0;
         }
         
         .bw-avatar svg {
@@ -141,6 +145,35 @@
             color: rgba(255,255,255,0.6);
         }
         
+        .bw-header-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        .bw-header-btn {
+            width: 32px;
+            height: 32px;
+            background: rgba(255,255,255,0.1);
+            border: none;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s;
+        }
+        
+        .bw-header-btn:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        
+        .bw-header-btn svg {
+            width: 16px;
+            height: 16px;
+            fill: #FFFFFF;
+        }
+        
+        /* Body */
         .bw-body {
             flex: 1;
             overflow-y: auto;
@@ -160,6 +193,7 @@
             border-radius: 2px;
         }
         
+        /* Messages */
         .bw-msg {
             display: flex;
             gap: 10px;
@@ -201,10 +235,10 @@
         }
         
         .bw-bubble {
-            max-width: 240px;
+            max-width: 260px;
             padding: 12px 14px;
             background: #FFFFFF;
-            border-radius: 12px;
+            border-radius: 14px;
             border-top-left-radius: 4px;
             font-family: 'Inter', sans-serif;
             font-size: 13px;
@@ -216,30 +250,30 @@
         .bw-msg.user .bw-bubble {
             background: #000000;
             color: #FFFFFF;
-            border-radius: 12px;
+            border-radius: 14px;
             border-top-right-radius: 4px;
         }
         
         /* Product Card */
-        .bw-product-card {
+        .bw-card {
             background: #FFFFFF;
-            border-radius: 10px;
+            border-radius: 12px;
             overflow: hidden;
             box-shadow: 0 2px 12px rgba(0,0,0,0.08);
-            max-width: 260px;
+            max-width: 280px;
         }
         
-        .bw-product-img {
+        .bw-card-img {
             width: 100%;
-            height: 140px;
+            height: 160px;
             object-fit: cover;
         }
         
-        .bw-product-info {
-            padding: 12px;
+        .bw-card-body {
+            padding: 14px;
         }
         
-        .bw-product-brand {
+        .bw-card-brand {
             font-size: 9px;
             font-weight: 600;
             letter-spacing: 1px;
@@ -248,70 +282,183 @@
             margin-bottom: 4px;
         }
         
-        .bw-product-name {
+        .bw-card-name {
             font-family: 'Playfair Display', serif;
+            font-size: 15px;
+            font-weight: 500;
+            color: #000;
+            margin-bottom: 6px;
+            line-height: 1.3;
+        }
+        
+        .bw-card-price {
             font-size: 14px;
+            font-weight: 600;
+            color: #000;
+            margin-bottom: 12px;
+        }
+        
+        .bw-card-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .bw-btn {
+            width: 100%;
+            padding: 11px 14px;
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            font-weight: 500;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        
+        .bw-btn-primary {
+            background: #000;
+            color: #FFF;
+        }
+        
+        .bw-btn-primary:hover {
+            background: #222;
+        }
+        
+        .bw-btn-secondary {
+            background: #F0F0F0;
+            color: #333;
+        }
+        
+        .bw-btn-secondary:hover {
+            background: #E5E5E5;
+        }
+        
+        .bw-btn-secondary.active {
+            background: #E0E0E0;
+        }
+        
+        /* Combo Accordion */
+        .bw-combo-container {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.35s ease, padding 0.35s ease;
+            background: #F8F8F8;
+            margin: 0 -14px -14px;
+            padding: 0 14px;
+        }
+        
+        .bw-combo-container.open {
+            max-height: 300px;
+            padding: 14px;
+            border-top: 1px solid #E5E5E5;
+        }
+        
+        .bw-combo-label {
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .bw-combo-card {
+            display: flex;
+            gap: 12px;
+            background: #FFF;
+            border-radius: 8px;
+            padding: 10px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.05);
+        }
+        
+        .bw-combo-img {
+            width: 70px;
+            height: 70px;
+            object-fit: cover;
+            border-radius: 6px;
+            flex-shrink: 0;
+        }
+        
+        .bw-combo-info {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        
+        .bw-combo-name {
+            font-size: 12px;
             font-weight: 500;
             color: #000;
             margin-bottom: 4px;
+            line-height: 1.3;
         }
         
-        .bw-product-price {
-            font-size: 13px;
+        .bw-combo-price {
+            font-size: 11px;
             font-weight: 600;
             color: #000;
-            margin-bottom: 10px;
+            margin-bottom: 8px;
         }
         
-        .bw-product-btn {
-            width: 100%;
-            padding: 10px;
+        .bw-combo-btn {
+            padding: 6px 10px;
+            font-size: 10px;
+            font-weight: 500;
             background: #000;
             color: #FFF;
             border: none;
-            border-radius: 6px;
-            font-family: 'Inter', sans-serif;
-            font-size: 11px;
-            font-weight: 500;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
+            border-radius: 4px;
             cursor: pointer;
-            transition: background 0.2s;
+            align-self: flex-start;
         }
         
-        .bw-product-btn:hover {
+        .bw-combo-btn:hover {
             background: #222;
         }
         
         /* Size Result */
         .bw-size-result {
-            background: #000;
+            background: linear-gradient(135deg, #000 0%, #1a1a1a 100%);
             color: #FFF;
-            padding: 16px;
-            border-radius: 10px;
+            padding: 20px;
+            border-radius: 12px;
             text-align: center;
-            max-width: 200px;
+            max-width: 220px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.2);
         }
         
         .bw-size-result-label {
             font-size: 10px;
-            letter-spacing: 1px;
+            letter-spacing: 1.5px;
             text-transform: uppercase;
             opacity: 0.7;
-            margin-bottom: 4px;
+            margin-bottom: 6px;
         }
         
         .bw-size-result-size {
             font-family: 'Playfair Display', serif;
-            font-size: 36px;
+            font-size: 48px;
             font-weight: 600;
-            margin-bottom: 4px;
+            margin-bottom: 6px;
         }
         
         .bw-size-result-conf {
-            font-size: 12px;
-            opacity: 0.8;
+            font-size: 13px;
+            opacity: 0.9;
         }
+        
+        .bw-size-result-conf.high { color: #4ade80; }
+        .bw-size-result-conf.medium { color: #fbbf24; }
+        .bw-size-result-conf.low { color: #f87171; }
         
         /* Typing */
         .bw-typing {
@@ -336,6 +483,7 @@
             30% { transform: translateY(-5px); }
         }
         
+        /* Footer */
         .bw-footer {
             padding: 12px 16px;
             background: #FFFFFF;
@@ -347,7 +495,7 @@
             align-items: center;
             gap: 10px;
             background: #F5F5F5;
-            border-radius: 20px;
+            border-radius: 24px;
             padding: 4px 4px 4px 16px;
         }
         
@@ -426,6 +574,11 @@
                     <div class="bw-header-title">Beymen AI Stylist</div>
                     <div class="bw-header-status">Çevrimiçi</div>
                 </div>
+                <div class="bw-header-actions">
+                    <button class="bw-header-btn" id="bw-reset" title="Yeni Sohbet">
+                        <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+                    </button>
+                </div>
             </div>
             <div class="bw-body" id="bw-messages"></div>
             <div class="bw-footer">
@@ -444,6 +597,7 @@
         document.getElementById('bw-input').onkeypress = (e) => {
             if (e.key === 'Enter') sendMessage();
         };
+        document.getElementById('bw-reset').onclick = resetChat;
     }
 
     // =========================================================================
@@ -465,12 +619,28 @@
 
         // Greeting
         if (isOpen && messages.length === 0) {
-            setTimeout(() => addBotMessage("Beymen'e hoş geldiniz. Bugün size nasıl yardımcı olabilirim?\n\n<em>(Örn: \"Gömlek arıyorum\", \"Mavi bir ceket var mı?\")</em>"), 400);
+            setTimeout(() => addBotMessage("Beymen'e hoş geldiniz. Bugün size nasıl yardımcı olabilirim?\n\n<em>(Örn: \"Gömlek arıyorum\", \"Ceket var mı?\", \"Kombin öner\")</em>"), 400);
         }
 
         if (isOpen) {
             setTimeout(() => document.getElementById('bw-input')?.focus(), 300);
         }
+    }
+
+    function resetChat() {
+        // Clear state
+        messages = [];
+        currentProductId = null;
+        userHeight = null;
+        userWeight = null;
+        productsCache = {};
+
+        // Clear UI
+        const container = document.getElementById('bw-messages');
+        container.innerHTML = '';
+
+        // Show greeting
+        setTimeout(() => addBotMessage("Beymen'e hoş geldiniz. Bugün size nasıl yardımcı olabilirim?\n\n<em>(Örn: \"Gömlek arıyorum\", \"Ceket var mı?\", \"Kombin öner\")</em>"), 300);
     }
 
     function addBotMessage(html, isCard = false) {
@@ -540,32 +710,66 @@
     }
 
     function processInput(text) {
-        const lower = text.toLowerCase();
+        // Check for measurements in text
+        const measurements = parseMeasurements(text);
 
-        // If awaiting measurements
-        if (awaitingMeasurements) {
-            const measurements = parseMeasurements(text);
-            if (measurements) {
-                awaitingMeasurements = false;
-                getSizeRecommendation(measurements.height, measurements.weight);
+        if (measurements) {
+            userHeight = measurements.height;
+            userWeight = measurements.weight;
+
+            // If we have a pending product, calculate size
+            if (currentProductId) {
+                addBotMessage(`Boy: ${userHeight}cm, Kilo: ${userWeight}kg olarak kaydettim. Hesaplıyorum...`);
+                getSizeRecommendation(currentProductId);
             } else {
-                addBotMessage("Özür dilerim, ölçülerinizi anlayamadım. Lütfen boy ve kilonuzu belirtin.\n\n<em>Örn: \"180 75\" veya \"Boyum 180, kilom 75\"</em>");
+                addBotMessage(`Ölçülerinizi kaydettim (${userHeight}cm / ${userWeight}kg). Şimdi bir ürün seçin, bedeninizi hemen hesaplayalım!`);
             }
             return;
         }
 
-        // Check if measurements are in the text (for size recommendation)
-        if (currentProduct && !awaitingMeasurements) {
-            const measurements = parseMeasurements(text);
-            if (measurements) {
-                getSizeRecommendation(measurements.height, measurements.weight);
-                return;
-            }
-        }
-
-        // Send all other messages to the Chat API
+        // Send to Chat API
         callChatAPI(text);
     }
+
+    function parseMeasurements(text) {
+        // Match patterns like "180 80", "180cm 80kg", "boyum 180 kilom 80"
+        const patterns = [
+            /(\d{2,3})\s*(?:cm)?\s+(\d{2,3})\s*(?:kg)?/i,
+            /boy[um]*\s*[:\s]*(\d{2,3}).*?kilo[m]*\s*[:\s]*(\d{2,3})/i,
+            /(\d{2,3})\s*[\/\-,]\s*(\d{2,3})/
+        ];
+
+        for (const pattern of patterns) {
+            const match = text.match(pattern);
+            if (match) {
+                let num1 = parseInt(match[1]);
+                let num2 = parseInt(match[2]);
+
+                // Determine which is height and which is weight
+                let height, weight;
+                if (num1 > 100 && num1 <= 220) {
+                    height = num1;
+                    weight = num2;
+                } else if (num2 > 100 && num2 <= 220) {
+                    height = num2;
+                    weight = num1;
+                } else {
+                    // Assume larger is height
+                    height = Math.max(num1, num2);
+                    weight = Math.min(num1, num2);
+                }
+
+                if (height >= 140 && height <= 220 && weight >= 35 && weight <= 180) {
+                    return { height, weight };
+                }
+            }
+        }
+        return null;
+    }
+
+    // =========================================================================
+    // API CALLS
+    // =========================================================================
 
     async function callChatAPI(message) {
         showTyping();
@@ -602,73 +806,102 @@
             addBotMessage(data.message);
         }
 
-        // If there's a product recommendation, show the card
-        if (data.recommended_product) {
-            const product = data.recommended_product;
-            currentProduct = product;
+        // If we have products, show the card
+        if (data.main_product) {
+            const main = data.main_product;
+            const combo = data.combo_product;
+
+            // Cache products
+            productsCache[main.id] = main;
+            if (combo) productsCache[combo.id] = combo;
 
             setTimeout(() => {
-                const cardHtml = `
-                    <div class="bw-product-card">
-                        <img src="${product.image_url}" alt="${product.name}" class="bw-product-img">
-                        <div class="bw-product-info">
-                            <div class="bw-product-brand">${product.brand}</div>
-                            <div class="bw-product-name">${product.name}</div>
-                            <div class="bw-product-price">${product.price}</div>
-                            <button class="bw-product-btn" onclick="BeymenAI.findSize()">Bedenimi Bul</button>
-                        </div>
-                    </div>
-                `;
+                const cardHtml = buildProductCard(main, combo);
                 addBotMessage(cardHtml, true);
             }, 400);
         }
     }
 
-    function findSize() {
-        if (!currentProduct) {
-            addBotMessage("Önce bir ürün seçmeniz gerekiyor.");
-            return;
-        }
+    function buildProductCard(main, combo) {
+        let html = `
+            <div class="bw-card">
+                <img src="${main.image_url}" alt="${main.name}" class="bw-card-img">
+                <div class="bw-card-body">
+                    <div class="bw-card-brand">${main.brand}</div>
+                    <div class="bw-card-name">${main.name}</div>
+                    <div class="bw-card-price">${main.price}</div>
+                    <div class="bw-card-actions">
+                        <button class="bw-btn bw-btn-primary" onclick="BeymenAI.triggerSizeCheck('${main.id}')">
+                            📏 Bedenimi Bul
+                        </button>
+        `;
 
-        awaitingMeasurements = true;
-        addBotMessage(`<strong>${currentProduct.name}</strong> için beden önerisi alalım.\n\nBu ürünün kalıbı <strong>${currentProduct.fit_type}</strong>'tir.\n\nBoy ve kilonuzu yazabilir misiniz?\n<em>Örn: \"182 75\" veya \"Boyum 182, kilom 75\"</em>`);
-
-        document.getElementById('bw-input')?.focus();
-    }
-
-    // =========================================================================
-    // MEASUREMENTS PARSING
-    // =========================================================================
-
-    function parseMeasurements(text) {
-        const numbers = text.match(/\d+/g);
-        if (!numbers || numbers.length < 2) return null;
-
-        const nums = numbers.map(n => parseInt(n)).filter(n => n > 0);
-        if (nums.length < 2) return null;
-
-        let height, weight;
-        const sorted = [...nums].sort((a, b) => b - a);
-
-        if (sorted[0] >= 140 && sorted[0] <= 220) {
-            height = sorted[0];
-            weight = sorted.find(n => n !== height && n >= 35 && n <= 180) || sorted[1];
+        if (combo) {
+            html += `
+                        <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.toggleCombo('${main.id}')">
+                            ✨ Kombini Gör
+                        </button>
+                    </div>
+                    <div class="bw-combo-container" id="combo-${main.id}">
+                        <div class="bw-combo-label">✨ Kombin Önerisi</div>
+                        <div class="bw-combo-card">
+                            <img src="${combo.image_url}" alt="${combo.name}" class="bw-combo-img">
+                            <div class="bw-combo-info">
+                                <div class="bw-combo-name">${combo.name}</div>
+                                <div class="bw-combo-price">${combo.price}</div>
+                                <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}')">📏 Bedenini Bul</button>
+                            </div>
+                        </div>
+                    </div>
+            `;
         } else {
-            [height, weight] = nums;
-            if (height < weight && weight > 100) [height, weight] = [weight, height];
+            html += `</div>`;
         }
 
-        if (height >= 140 && height <= 220 && weight >= 35 && weight <= 180) {
-            return { height, weight };
-        }
-        return null;
+        html += `
+                </div>
+            </div>
+        `;
+
+        return html;
     }
 
     // =========================================================================
-    // API CALLS
+    // SIZE CHECK FLOW
     // =========================================================================
 
-    async function getSizeRecommendation(height, weight) {
+    function triggerSizeCheck(productId) {
+        currentProductId = productId;
+        const product = productsCache[productId];
+        const productName = product ? product.name : 'bu ürün';
+
+        if (userHeight && userWeight) {
+            // We have measurements, calculate directly
+            addBotMessage(`<strong>${productName}</strong> için bedeninizi hesaplıyorum...`);
+            getSizeRecommendation(productId);
+        } else {
+            // Ask for measurements
+            addBotMessage(`<strong>${productName}</strong> için beden hesaplayabilmem için boy ve kilonuzu yazar mısınız?\n\n<em>Örn: "180 80" veya "Boyum 180, kilom 80"</em>`);
+            document.getElementById('bw-input')?.focus();
+        }
+    }
+
+    function toggleCombo(productId) {
+        const container = document.getElementById(`combo-${productId}`);
+        if (container) {
+            container.classList.toggle('open');
+
+            // Update button state
+            const buttons = document.querySelectorAll('.bw-btn-secondary');
+            buttons.forEach(btn => {
+                if (btn.onclick.toString().includes(productId)) {
+                    btn.classList.toggle('active', container.classList.contains('open'));
+                }
+            });
+        }
+    }
+
+    async function getSizeRecommendation(productId) {
         showTyping();
 
         try {
@@ -679,9 +912,9 @@
                     'X-API-Key': CONFIG.apiKey
                 },
                 body: JSON.stringify({
-                    product_id: currentProduct.id,
-                    user_height: height,
-                    user_weight: weight,
+                    product_id: productId,
+                    user_height: userHeight,
+                    user_weight: userWeight,
                     body_shape: 'average',
                     preferred_fit: 'true_to_size'
                 })
@@ -696,8 +929,8 @@
 
         } catch (error) {
             hideTyping();
-            addBotMessage("Üzgünüm, şu anda beden önerisi alamıyorum. Lütfen daha sonra tekrar deneyin.");
-            console.error('API Error:', error);
+            addBotMessage("Üzgünüm, şu anda beden hesaplayamıyorum. Lütfen tekrar deneyin.");
+            console.error('Size API Error:', error);
         }
     }
 
@@ -705,11 +938,15 @@
         const size = data.recommended_size;
         const confidence = data.confidence_score;
 
+        let confClass = 'high';
+        if (confidence < 80) confClass = 'medium';
+        if (confidence < 60) confClass = 'low';
+
         const resultHtml = `
             <div class="bw-size-result">
                 <div class="bw-size-result-label">Önerilen Beden</div>
                 <div class="bw-size-result-size">${size}</div>
-                <div class="bw-size-result-conf">%${confidence} Uyum</div>
+                <div class="bw-size-result-conf ${confClass}">%${confidence} Uyum</div>
             </div>
         `;
 
@@ -718,14 +955,14 @@
         setTimeout(() => {
             let note = data.fit_description_tr || data.fit_description || 'Bu beden size uygun görünüyor.';
             if (data.alternative_size) {
-                note += `\n\nAlternatif olarak <strong>${data.alternative_size}</strong> beden de deneyebilirsiniz.`;
+                note += `\n\nAlternatif: <strong>${data.alternative_size}</strong> beden de deneyebilirsiniz.`;
             }
             addBotMessage(note);
-        }, 600);
+        }, 500);
 
         setTimeout(() => {
-            addBotMessage("Başka bir sorunuz var mı? Size yardımcı olmaktan memnuniyet duyarım.");
-        }, 1200);
+            addBotMessage("Başka bir ürün veya sorunuz var mı?");
+        }, 1000);
     }
 
     // =========================================================================
@@ -736,14 +973,16 @@
         Object.assign(CONFIG, options);
         injectStyles();
         createWidget();
-        console.log('Beymen AI Shopper initialized');
+        console.log('Beymen AI Shopper v4.0 initialized');
     }
 
     // Expose globally
     window.BeymenAI = {
         init,
         toggle: toggleChat,
-        findSize
+        reset: resetChat,
+        triggerSizeCheck,
+        toggleCombo
     };
 
 })(window, document);
