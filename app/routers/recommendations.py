@@ -9,7 +9,7 @@ from app.models.schemas import (
     RecommendRequest, RecommendResponse, FitType, BodyShape
 )
 from app.services.recommendation_engine import recommendation_engine
-from app.routers.products import get_product_by_id
+from app.routers.products import get_product_by_id, get_product_by_id_from_db
 
 router = APIRouter(prefix="/api/v1", tags=["Recommendations"])
 
@@ -50,13 +50,21 @@ async def get_recommendation(request: RecommendRequest):
     - `true_to_size`: Standard recommendation
     - `looser`: Prefer more relaxed fit
     """
-    # Get product from store
+    # Get product: try in-memory first, then DB
     product = get_product_by_id(request.product_id)
-    
+    if not product:
+        product = await get_product_by_id_from_db(request.product_id)
+
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Product {request.product_id} not found. Please ingest the product first."
+            detail=f"Product {request.product_id} not found."
+        )
+
+    if not product.get("measurements"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Bu ürün için ölçü verisi mevcut değil. Beden önerisi yapılamıyor."
         )
     
     # Parse body shape

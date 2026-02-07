@@ -227,19 +227,53 @@ async def list_products(
 
 def get_product_by_id(product_id: UUID) -> dict:
     """
-    Helper function to get product by ID.
-    Used by other routers.
-    
+    Helper function to get product by ID (sync, in-memory only).
     Checks both ingested products and demo products.
     """
-    # First check ingested products
     if product_id in _products_store:
         return _products_store[product_id]
-    
-    # Then check demo products (using string ID for lookup)
     product_id_str = str(product_id)
     if product_id_str in DEMO_PRODUCTS_WITH_MEASUREMENTS:
         return DEMO_PRODUCTS_WITH_MEASUREMENTS[product_id_str]
-    
     return None
+
+
+async def get_product_by_id_from_db(product_id: UUID) -> dict:
+    """
+    Fetch product from Supabase DB by ID. Returns a dict with measurements
+    (falling back to category-based defaults if the product has none).
+    """
+    from app.models.database import get_session_factory, Product as DBProduct
+    from sqlalchemy import select as sa_select
+
+    # Lazy import to avoid circular deps
+    from app.main import _guess_category, _get_default_measurements, _extract_brand_from_url
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        stmt = sa_select(DBProduct).where(DBProduct.id == str(product_id))
+        result = await session.execute(stmt)
+        p = result.scalars().first()
+
+    if not p:
+        return None
+
+    category = p.category or _guess_category(p.name)
+    measurements = p.measurements or _get_default_measurements(category)
+    if p.fit_type:
+        fit_type = p.fit_type
+    elif category in ("palto", "mont", "kaban", "parka", "pardösü"):
+        fit_type = "loose_fit"
+    else:
+        fit_type = "regular_fit"
+    fabric = p.fabric_composition or {"cotton": 100}
+
+    return {
+        "id": str(p.id),
+        "name": p.name,
+        "measurements": measurements,
+        "fit_type": fit_type,
+        "fabric_composition": fabric,
+        "brand": p.brand or _extract_brand_from_url(p.url),
+    }
 

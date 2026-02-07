@@ -229,19 +229,23 @@ class RecommendationEngine:
             fit_status = self._get_fit_status(available_space, required_ease)
             
             # Calculate fit score for this measurement
+            # Use a smooth gradient: peak at ideal ease, tapering on both sides
             if available_space < 0:
                 # Garment is smaller than body - too tight
                 fit_score = max(0, 30 + (available_space * 5))  # Severe penalty
             elif fit_status == "tight":
                 fit_score = 50
             elif fit_status == "fitted":
-                fit_score = 75
+                fit_score = 80
             elif fit_status == "comfortable":
                 fit_score = 100
             elif fit_status == "loose":
-                fit_score = 85
+                # Gradient: reduce score based on how much excess
+                excess_ratio = available_space / max(required_ease, 1)
+                fit_score = max(60, 95 - (excess_ratio - 1.2) * 30)
             else:  # very_loose
-                fit_score = 60
+                excess_ratio = available_space / max(required_ease, 1)
+                fit_score = max(30, 65 - (excess_ratio - 1.5) * 20)
             
             # Apply user preference adjustment
             if preferred_fit == "tighter" and fit_status in ["fitted", "tight"]:
@@ -383,7 +387,13 @@ class RecommendationEngine:
             size_scores[size_code] = (score, breakdowns)
         
         # Step 3: Find best size
-        sorted_sizes = sorted(size_scores.items(), key=lambda x: x[1][0], reverse=True)
+        # Tiebreaker: when scores are equal, prefer smaller size (less excess fabric)
+        size_order = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "XXXL": 7}
+        sorted_sizes = sorted(
+            size_scores.items(),
+            key=lambda x: (x[1][0], -size_order.get(x[0], 5)),
+            reverse=True,
+        )
         best_size, (best_score, best_breakdowns) = sorted_sizes[0]
         
         # Step 4: Determine alternative size

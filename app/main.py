@@ -54,6 +54,17 @@ def _product_to_dict(p: Product) -> dict:
     """Convert a Product ORM row to a serialisable dict for the widget."""
     brand = p.brand or _extract_brand_from_url(p.url)
     price_str = f"{p.price:,.0f} TL".replace(",", ".") if p.price else None
+    category = p.category or _guess_category(p.name)
+    measurements = p.measurements or _get_default_measurements(category)
+    # Outerwear defaults to loose_fit (worn over other layers)
+    if p.fit_type:
+        fit_type = p.fit_type
+    elif category in ("palto", "mont", "kaban", "parka", "pardösü"):
+        fit_type = "loose_fit"
+    else:
+        fit_type = "regular_fit"
+    fabric = p.fabric_composition or {"cotton": 100}
+    sizes = p.sizes if p.sizes else (list(measurements.keys()) if measurements else [])
     return {
         "id": str(p.id),
         "sku": p.sku,
@@ -63,8 +74,11 @@ def _product_to_dict(p: Product) -> dict:
         "price_raw": p.price,
         "url": p.url,
         "image_url": p.image_url,
-        "category": p.category or _guess_category(p.name),
-        "sizes": p.sizes or [],
+        "category": category,
+        "sizes": sizes,
+        "measurements": measurements,
+        "fit_type": fit_type,
+        "fabric_composition": fabric,
     }
 
 
@@ -97,6 +111,66 @@ def _guess_category(name: str) -> Optional[str]:
         if kw in lower:
             return cat
     return None
+
+
+# =============================================================================
+# DEFAULT MEASUREMENTS — fallback when DB has no measurements for a product
+# =============================================================================
+# Standard Turkish men's garment measurements (chest_width, length, waist, shoulder_width) in cm
+
+_DEFAULT_MEASUREMENTS = {
+    # Dış giyim has ~8-12cm ease over body (worn over other layers)
+    "dış_giyim": {  # palto, mont, kaban, parka, pardösü
+        "S":   {"chest_width": 100, "length": 78, "shoulder_width": 43, "waist": 94},
+        "M":   {"chest_width": 106, "length": 80, "shoulder_width": 45, "waist": 100},
+        "L":   {"chest_width": 112, "length": 82, "shoulder_width": 47, "waist": 106},
+        "XL":  {"chest_width": 118, "length": 84, "shoulder_width": 49, "waist": 112},
+        "XXL": {"chest_width": 124, "length": 86, "shoulder_width": 51, "waist": 118},
+    },
+    # Üst giyim has ~5-8cm ease (structured, single layer)
+    "üst_giyim": {  # ceket, blazer, yelek
+        "S":   {"chest_width": 96, "length": 70, "shoulder_width": 42, "waist": 90},
+        "M":   {"chest_width": 102, "length": 72, "shoulder_width": 44, "waist": 96},
+        "L":   {"chest_width": 108, "length": 74, "shoulder_width": 46, "waist": 102},
+        "XL":  {"chest_width": 114, "length": 76, "shoulder_width": 48, "waist": 108},
+        "XXL": {"chest_width": 120, "length": 78, "shoulder_width": 50, "waist": 114},
+    },
+    # Alt giyim: waist + hip are key measurements (no chest)
+    "alt_giyim": {  # pantolon, chino, jean
+        "S":   {"waist": 76, "hip": 94, "length": 102},
+        "M":   {"waist": 82, "hip": 100, "length": 104},
+        "L":   {"waist": 88, "hip": 106, "length": 106},
+        "XL":  {"waist": 94, "hip": 112, "length": 108},
+        "XXL": {"waist": 100, "hip": 118, "length": 110},
+    },
+    # Üst iç giyim: ~3-5cm ease (body-hugging)
+    "üst_iç_giyim": {  # gömlek, tişört, kazak, triko
+        "S":   {"chest_width": 94, "length": 72, "shoulder_width": 42, "waist": 88},
+        "M":   {"chest_width": 100, "length": 74, "shoulder_width": 44, "waist": 94},
+        "L":   {"chest_width": 106, "length": 76, "shoulder_width": 46, "waist": 100},
+        "XL":  {"chest_width": 112, "length": 78, "shoulder_width": 48, "waist": 106},
+        "XXL": {"chest_width": 118, "length": 80, "shoulder_width": 50, "waist": 112},
+    },
+}
+
+_CATEGORY_TO_MEASUREMENT_GROUP = {
+    "palto": "dış_giyim", "mont": "dış_giyim", "kaban": "dış_giyim",
+    "parka": "dış_giyim", "pardösü": "dış_giyim",
+    "ceket": "üst_giyim", "yelek": "üst_giyim",
+    "pantolon": "alt_giyim",
+    "gömlek": "üst_iç_giyim", "tişört": "üst_iç_giyim",
+    "kazak": "üst_iç_giyim",
+}
+
+
+def _get_default_measurements(category: Optional[str]) -> Optional[dict]:
+    """Return default measurements for a category, or None."""
+    if not category:
+        return None
+    group = _CATEGORY_TO_MEASUREMENT_GROUP.get(category)
+    if not group:
+        return None
+    return _DEFAULT_MEASUREMENTS.get(group)
 
 
 # Combo mapping: category -> list of complementary categories
@@ -198,6 +272,9 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     """Response from chat endpoint."""
     message: str
+    products: List[Dict[str, Any]] = []
+    combos: List[Dict[str, Any]] = []
+    # Backward compat
     main_product: Optional[Dict[str, Any]] = None
     combo_product: Optional[Dict[str, Any]] = None
     conversation_id: Optional[str] = None
@@ -226,22 +303,22 @@ Cevabını SADECE JSON olarak ver:
 Sadece JSON döndür."""
 
 STYLIST_PROMPT = """Sen Beymen'in Elit AI Stilistisin. Lüks, kibar ve profesyonel bir Türkçe ile konuş.
-"Efendim", "Memnuniyetle" gibi ifadeler kullan. Kısa ve öz yanıt ver (2-3 cümle).
+"Efendim", "Memnuniyetle" gibi ifadeler kullan. Kısa ve öz yanıt ver (3-4 cümle).
 
 Müşteriye aşağıdaki ürünleri öneriyorsun:
 
-**ANA ÜRÜN:**
-{main_product}
+**ANA ÜRÜNLER:**
+{main_products}
 
-**KOMBİN ÖNERİSİ:**
-{combo_product}
+**KOMBİN ÖNERİLERİ:**
+{combo_products}
 
 Müşterinin orijinal mesajı: "{user_message}"
 
 Yanıtında:
-1. Ana ürünü tanıt (isim ve neden iyi bir seçim olduğunu belirt).
-2. Kombin ürününü öner ("Bu ürünün altına/üstüne ... harika olur" gibi).
-3. Beden yardımı teklif et.
+1. Ana ürünleri kısaca tanıt (birden fazlaysa her birini bir cümleyle belirt).
+2. Kombin önerilerini sun ("Yanına ... harika olur" gibi).
+3. Beden yardımı teklif et ("Bedeninizi bulmam için boy ve kilonuzu yazabilirsiniz").
 
 Düz metin olarak yanıtla, JSON değil. Lüks, elit ve samimi bir ton kullan."""
 
@@ -338,18 +415,24 @@ def _fallback_intent(text: str) -> dict:
     }
 
 
-async def generate_styled_response(user_message: str, main: dict, combo: Optional[dict]) -> str:
+async def generate_styled_response(user_message: str, products: List[dict], combos: List[dict]) -> str:
     """Ask OpenAI to write a luxurious Turkish response about these products."""
     api_key = os.getenv("OPENAI_API_KEY")
 
-    main_desc = f"{main['brand']} - {main['name']}" + (f" ({main['price']})" if main.get("price") else "")
-    combo_desc = "Yok" if not combo else f"{combo['brand']} - {combo['name']}" + (f" ({combo['price']})" if combo.get("price") else "")
+    def _desc(p: dict) -> str:
+        s = f"{p['brand']} - {p['name']}"
+        if p.get("price"):
+            s += f" ({p['price']})"
+        return s
+
+    main_desc = "\n".join(f"- {_desc(p)}" for p in products) if products else "Yok"
+    combo_desc = "\n".join(f"- {_desc(c)}" for c in combos) if combos else "Yok"
 
     if api_key:
         try:
             prompt = STYLIST_PROMPT.format(
-                main_product=main_desc,
-                combo_product=combo_desc,
+                main_products=main_desc,
+                combo_products=combo_desc,
                 user_message=user_message,
             )
             async with httpx.AsyncClient() as client:
@@ -363,7 +446,7 @@ async def generate_styled_response(user_message: str, main: dict, combo: Optiona
                             {"role": "user", "content": user_message},
                         ],
                         "temperature": 0.7,
-                        "max_tokens": 300,
+                        "max_tokens": 400,
                     },
                     timeout=15.0,
                 )
@@ -373,11 +456,16 @@ async def generate_styled_response(user_message: str, main: dict, combo: Optiona
             print(f"Stylist response error: {e}")
 
     # Fallback
+    main = products[0] if products else None
+    if not main:
+        return "Maalesef uygun ürün bulamadım efendim."
     msg = f"Memnuniyetle efendim! Size {main['brand']} {main['name']} önerebilirim."
     if main.get("price"):
         msg += f" Fiyatı {main['price']}."
-    if combo:
-        msg += f" Yanına {combo['brand']} {combo['name']} ile harika bir kombin oluşturabilirsiniz."
+    if len(products) > 1:
+        msg += f" Ayrıca {products[1]['brand']} {products[1]['name']} da ilginizi çekebilir."
+    if combos:
+        msg += f" Yanına {combos[0]['brand']} {combos[0]['name']} ile harika bir kombin oluşturabilirsiniz."
     msg += " Bedeninizi bulmam için boy ve kilonuzu yazabilirsiniz."
     return msg
 
@@ -485,22 +573,24 @@ async def chat_with_ai(request: ChatRequest):
             conversation_id=request.conversation_id,
         )
 
-    main = found[0]
-    main_cat = main.get("category") or _guess_category(main["name"])
+    # Determine main category from first result for combo lookup
+    main_cat = found[0].get("category") or _guess_category(found[0]["name"])
+    exclude_ids = [p["id"] for p in found]
 
-    # Find combo
-    combo = None
+    # Find combos (complementary products)
+    combos = []
     if main_cat:
-        combos = await get_combo_products(main_cat, main["id"], limit=1)
-        combo = combos[0] if combos else None
+        combos = await get_combo_products(main_cat, exclude_ids[0], limit=2)
 
     # Generate styled message
-    styled_msg = await generate_styled_response(request.message, main, combo)
+    styled_msg = await generate_styled_response(request.message, found, combos)
 
     return ChatResponse(
         message=styled_msg,
-        main_product=main,
-        combo_product=combo,
+        products=found,
+        combos=combos,
+        main_product=found[0] if found else None,
+        combo_product=combos[0] if combos else None,
         conversation_id=request.conversation_id,
     )
 
@@ -577,16 +667,20 @@ Sadece JSON."""
         kws = parsed.get("keywords", [])
         found = await search_products(kws, limit=3) if kws else []
 
-        main_product = found[0] if found else None
-        combo_product = None
-        if main_product:
-            cat = main_product.get("category") or _guess_category(main_product["name"])
+        combos = []
+        if found:
+            cat = found[0].get("category") or _guess_category(found[0]["name"])
             if cat:
-                combos = await get_combo_products(cat, main_product["id"], limit=1)
-                combo_product = combos[0] if combos else None
+                combos = await get_combo_products(cat, found[0]["id"], limit=2)
 
-        msg = await generate_styled_response("gorsel arama", main_product, combo_product) if main_product else "Bu gorsele uygun urun bulamadim."
-        return {"message": msg, "main_product": main_product, "combo_product": combo_product}
+        msg = await generate_styled_response("gorsel arama", found, combos) if found else "Bu gorsele uygun urun bulamadim."
+        return {
+            "message": msg,
+            "products": found,
+            "combos": combos,
+            "main_product": found[0] if found else None,
+            "combo_product": combos[0] if combos else None,
+        }
 
     except Exception as e:
         print(f"Vision error: {e}")

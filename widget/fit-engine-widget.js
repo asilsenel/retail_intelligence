@@ -30,6 +30,8 @@
     let userWeight = null;
     let productsCache = {};
     let cardCounter = 0;  // Unique ID for each card
+    let selectedProducts = {};  // id -> { product, cardId }
+    let cardProductMap = {};    // cardId -> productId (to link size results)
 
     // =========================================================================
     // STYLES
@@ -378,7 +380,7 @@
         }
         
         .bw-combo-container.open {
-            max-height: 300px;
+            max-height: 500px;
             padding: 14px;
             border-top: 1px solid #E5E5E5;
         }
@@ -526,6 +528,61 @@
         .bw-send svg { width: 16px; height: 16px; fill: #FFF; }
         
         #bw-file-input { display: none; }
+
+        /* Selection */
+        .bw-btn-select { background: #F0F0F0; color: #333; }
+        .bw-btn-select:hover { background: #E5E5E5; }
+        .bw-btn-select.selected { background: #000; color: #FFF; }
+
+        .bw-selection-summary {
+            background: #FFFFFF;
+            border-radius: 12px;
+            padding: 14px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+            max-width: 280px;
+            animation: bwFadeIn 0.4s ease;
+        }
+
+        .bw-selection-title {
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .bw-selection-item {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #F0F0F0;
+        }
+
+        .bw-selection-item:last-child { border-bottom: none; }
+
+        .bw-selection-img {
+            width: 40px;
+            height: 40px;
+            object-fit: cover;
+            border-radius: 6px;
+            flex-shrink: 0;
+        }
+
+        .bw-selection-info { flex: 1; }
+
+        .bw-selection-name {
+            font-size: 12px;
+            font-weight: 500;
+            color: #000;
+        }
+
+        .bw-selection-size {
+            font-size: 11px;
+            font-weight: 600;
+            color: #4ade80;
+        }
     `;
 
     // =========================================================================
@@ -624,6 +681,8 @@
         userWeight = null;
         productsCache = {};
         cardCounter = 0;
+        selectedProducts = {};
+        cardProductMap = {};
 
         document.getElementById('bw-messages').innerHTML = '';
         setTimeout(() => addBotMessage("Beymen'e hoş geldiniz! 👋\n\nSize nasıl yardımcı olabilirim?\n\n<em>💬 \"Ceket arıyorum\"\n📷 Fotoğraf yükleyebilirsiniz</em>"), 300);
@@ -711,8 +770,11 @@
                 addBotMessage(`✓ ${userHeight}cm / ${userWeight}kg kaydedildi. Hesaplıyorum...`);
                 getSizeRecommendation(currentActiveProductId);
             } else {
-                addBotMessage(`Ölçülerinizi kaydettim (${userHeight}cm / ${userWeight}kg). 👍\n\nŞimdi bir ürün seçin, bedeninizi hemen hesaplayalım!`);
+                addBotMessage(`✓ Ölçülerinizi kaydettim (${userHeight}cm / ${userWeight}kg). Tüm ürünler için beden hesaplıyorum...`);
             }
+
+            // Auto-calculate size for ALL visible cards
+            setTimeout(() => autoSizeAllVisibleCards(), 300);
             return;
         }
 
@@ -821,25 +883,36 @@
     function handleChatResponse(data) {
         if (data.message) addBotMessage(data.message);
 
-        if (data.main_product) {
-            const main = data.main_product;
-            const combo = data.combo_product;
+        // Support new multi-product format (products[] + combos[])
+        const products = data.products && data.products.length > 0
+            ? data.products
+            : (data.main_product ? [data.main_product] : []);
+        const combos = data.combos && data.combos.length > 0
+            ? data.combos
+            : (data.combo_product ? [data.combo_product] : []);
 
-            productsCache[main.id] = main;
-            if (combo) productsCache[combo.id] = combo;
+        if (products.length === 0) return;
 
+        // Cache all products
+        products.forEach(p => { productsCache[p.id] = p; });
+        combos.forEach(c => { productsCache[c.id] = c; });
+
+        // Render each product card with delay
+        products.forEach((product, idx) => {
             setTimeout(() => {
-                const cardHtml = buildProductCard(main, combo);
+                const cardHtml = buildProductCard(product, combos, idx === 0);
                 addBotMessage(cardHtml, true);
-            }, 400);
-        }
+            }, 400 + idx * 300);
+        });
     }
 
-    function buildProductCard(main, combo) {
+    function buildProductCard(main, combos, showCombos) {
         const cardId = `card-${++cardCounter}`;
+        cardProductMap[cardId] = main.id;
         const brandText = main.brand || 'Beymen';
         const priceText = main.price || '';
         const mainUrl = main.url || '#';
+        const hasCombos = showCombos && combos && combos.length > 0;
 
         let html = `
             <div class="bw-card" id="${cardId}">
@@ -850,45 +923,100 @@
                     <div class="bw-card-brand">${brandText}</div>
                     <div class="bw-card-name">${main.name}</div>
                     ${priceText ? `<div class="bw-card-price">${priceText}</div>` : ''}
+                    <div id="size-result-${cardId}"></div>
                     <div class="bw-card-actions">
+                        <button class="bw-btn bw-btn-select" id="sel-${cardId}" onclick="BeymenAI.selectProduct('${main.id}', '${cardId}')">
+                            ♡ Seç
+                        </button>
                         <button class="bw-btn bw-btn-primary" id="btn-${cardId}" onclick="BeymenAI.triggerSizeCheck('${main.id}', '${cardId}')">
                             📏 Bedenimi Bul
                         </button>
         `;
 
-        if (combo) {
-            const comboBrand = combo.brand || 'Beymen';
-            const comboPrice = combo.price || '';
-            const comboUrl = combo.url || '#';
+        if (hasCombos) {
             html += `
                         <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.toggleCombo('${cardId}')">
-                            ✨ Kombini Gör
+                            ✨ Kombini Gör (${combos.length})
                         </button>
                     </div>
-                    <div id="size-result-${cardId}"></div>
                     <div class="bw-combo-container" id="combo-${cardId}">
-                        <div class="bw-combo-label">✨ Kombin Önerisi</div>
-                        <div class="bw-combo-card">
+                        <div class="bw-combo-label">✨ Kombin Önerileri</div>
+            `;
+            combos.forEach(combo => {
+                const comboCardId = `card-${++cardCounter}`;
+                cardProductMap[comboCardId] = combo.id;
+                const comboBrand = combo.brand || 'Beymen';
+                const comboPrice = combo.price || '';
+                const comboUrl = combo.url || '#';
+                html += `
+                        <div class="bw-combo-card" id="${comboCardId}" style="margin-bottom:8px">
                             <a href="${comboUrl}" target="_blank" rel="noopener">
                                 <img src="${combo.image_url}" alt="${combo.name}" class="bw-combo-img">
                             </a>
                             <div class="bw-combo-info">
                                 <div class="bw-combo-name">${comboBrand} - ${combo.name}</div>
                                 ${comboPrice ? `<div class="bw-combo-price">${comboPrice}</div>` : ''}
-                                <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}', '${cardId}')">📏 Bedenini Bul</button>
+                                <div id="size-result-${comboCardId}" style="margin:4px 0"></div>
+                                <div style="display:flex;gap:6px">
+                                    <button class="bw-combo-btn" style="background:#F0F0F0;color:#333" id="sel-${comboCardId}" onclick="BeymenAI.selectProduct('${combo.id}', '${comboCardId}')">♡ Seç</button>
+                                    <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}', '${comboCardId}')">📏 Beden</button>
+                                </div>
                             </div>
                         </div>
-                    </div>
-            `;
+                `;
+            });
+            html += `</div>`;
         } else {
             html += `
                     </div>
-                    <div id="size-result-${cardId}"></div>
             `;
         }
 
         html += `</div></div>`;
+
+        // Auto-trigger size recommendation if user measurements already known
+        if (userHeight && userWeight) {
+            setTimeout(() => autoSizeForCard(main.id, cardId), 200);
+            if (hasCombos) {
+                combos.forEach((combo, ci) => {
+                    const cid = `card-${cardCounter - combos.length + ci + 1}`;
+                    setTimeout(() => autoSizeForCard(combo.id, cid), 400 + ci * 200);
+                });
+            }
+        }
+
         return html;
+    }
+
+    async function autoSizeForCard(productId, cardId) {
+        try {
+            const response = await fetch(`${CONFIG.apiUrl}/api/v1/recommend`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-API-Key': CONFIG.apiKey },
+                body: JSON.stringify({
+                    product_id: productId,
+                    user_height: userHeight,
+                    user_weight: userWeight,
+                    body_shape: 'average',
+                    preferred_fit: 'true_to_size'
+                })
+            });
+            if (!response.ok) return;
+            const data = await response.json();
+            displaySizeResult(data, cardId, productId, true);  // silent
+        } catch (e) {
+            console.error('Auto size error:', e);
+        }
+    }
+
+    function autoSizeAllVisibleCards() {
+        // Calculate size for all visible product cards
+        Object.entries(cardProductMap).forEach(([cardId, productId]) => {
+            const el = document.getElementById(`size-result-${cardId}`);
+            if (el && el.innerHTML.trim() === '') {
+                autoSizeForCard(productId, cardId);
+            }
+        });
     }
 
     // =========================================================================
@@ -958,7 +1086,7 @@
         }
     }
 
-    function displaySizeResult(data, cardId, productId) {
+    function displaySizeResult(data, cardId, productId, silent = false) {
         const size = data.recommended_size;
         const confidence = data.confidence_score;
 
@@ -985,15 +1113,71 @@
             btn.classList.add('active');
         }
 
-        // Add follow-up message
-        const product = productsCache[productId];
-        setTimeout(() => {
-            let msg = `<strong>${product?.name || 'Bu ürün'}</strong> için <strong>${size}</strong> beden öneriyorum.`;
-            if (data.alternative_size) {
-                msg += `\n\nAlternatif: <strong>${data.alternative_size}</strong> de deneyebilirsiniz.`;
+        // Store size in cache for selection summary
+        if (productsCache[productId]) {
+            productsCache[productId]._recommendedSize = size;
+            productsCache[productId]._confidence = confidence;
+        }
+
+        // Update selection summary if product is selected
+        if (selectedProducts[productId]) {
+            showSelections();
+        }
+
+        // Add follow-up message only on manual trigger
+        if (!silent) {
+            const product = productsCache[productId];
+            setTimeout(() => {
+                let msg = `<strong>${product?.name || 'Bu ürün'}</strong> için <strong>${size}</strong> beden öneriyorum.`;
+                if (data.alternative_size) {
+                    msg += ` Alternatif: <strong>${data.alternative_size}</strong>.`;
+                }
+                addBotMessage(msg);
+            }, 500);
+        }
+    }
+
+    function selectProduct(productId, cardId) {
+        const btn = document.getElementById(`sel-${cardId}`);
+        if (selectedProducts[productId]) {
+            delete selectedProducts[productId];
+            if (btn) { btn.classList.remove('selected'); btn.innerHTML = '♡ Seç'; }
+        } else {
+            const product = productsCache[productId];
+            if (product) {
+                selectedProducts[productId] = { product, cardId };
+                if (btn) { btn.classList.add('selected'); btn.innerHTML = '♥ Seçildi'; }
             }
-            addBotMessage(msg);
-        }, 500);
+        }
+        showSelections();
+    }
+
+    function showSelections() {
+        // Remove old summary
+        document.getElementById('bw-selection-summary')?.closest('.bw-msg')?.remove();
+
+        const ids = Object.keys(selectedProducts);
+        if (ids.length === 0) return;
+
+        let html = `<div class="bw-selection-summary" id="bw-selection-summary">
+            <div class="bw-selection-title">🛍 Seçimlerim (${ids.length})</div>`;
+
+        ids.forEach(id => {
+            const { product } = selectedProducts[id];
+            const size = product._recommendedSize;
+            const sizeText = size ? `Beden: ${size}` : '';
+            html += `
+                <div class="bw-selection-item">
+                    <img src="${product.image_url}" alt="" class="bw-selection-img">
+                    <div class="bw-selection-info">
+                        <div class="bw-selection-name">${product.brand || 'Beymen'} - ${product.name}</div>
+                        ${sizeText ? `<div class="bw-selection-size">${sizeText}</div>` : ''}
+                    </div>
+                </div>`;
+        });
+
+        html += `</div>`;
+        addBotMessage(html, true);
     }
 
     // =========================================================================
@@ -1012,7 +1196,8 @@
         toggle: toggleChat,
         reset: resetChat,
         triggerSizeCheck,
-        toggleCombo
+        toggleCombo,
+        selectProduct
     };
 
 })(window, document);
