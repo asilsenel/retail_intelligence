@@ -837,14 +837,19 @@
 
     function buildProductCard(main, combo) {
         const cardId = `card-${++cardCounter}`;
+        const brandText = main.brand || 'Beymen';
+        const priceText = main.price || '';
+        const mainUrl = main.url || '#';
 
         let html = `
             <div class="bw-card" id="${cardId}">
-                <img src="${main.image_url}" alt="${main.name}" class="bw-card-img">
+                <a href="${mainUrl}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
+                    <img src="${main.image_url}" alt="${main.name}" class="bw-card-img">
+                </a>
                 <div class="bw-card-body">
-                    <div class="bw-card-brand">${main.brand}</div>
+                    <div class="bw-card-brand">${brandText}</div>
                     <div class="bw-card-name">${main.name}</div>
-                    <div class="bw-card-price">${main.price}</div>
+                    ${priceText ? `<div class="bw-card-price">${priceText}</div>` : ''}
                     <div class="bw-card-actions">
                         <button class="bw-btn bw-btn-primary" id="btn-${cardId}" onclick="BeymenAI.triggerSizeCheck('${main.id}', '${cardId}')">
                             📏 Bedenimi Bul
@@ -852,6 +857,9 @@
         `;
 
         if (combo) {
+            const comboBrand = combo.brand || 'Beymen';
+            const comboPrice = combo.price || '';
+            const comboUrl = combo.url || '#';
             html += `
                         <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.toggleCombo('${cardId}')">
                             ✨ Kombini Gör
@@ -861,10 +869,12 @@
                     <div class="bw-combo-container" id="combo-${cardId}">
                         <div class="bw-combo-label">✨ Kombin Önerisi</div>
                         <div class="bw-combo-card">
-                            <img src="${combo.image_url}" alt="${combo.name}" class="bw-combo-img">
+                            <a href="${comboUrl}" target="_blank" rel="noopener">
+                                <img src="${combo.image_url}" alt="${combo.name}" class="bw-combo-img">
+                            </a>
                             <div class="bw-combo-info">
-                                <div class="bw-combo-name">${combo.name}</div>
-                                <div class="bw-combo-price">${combo.price}</div>
+                                <div class="bw-combo-name">${comboBrand} - ${combo.name}</div>
+                                ${comboPrice ? `<div class="bw-combo-price">${comboPrice}</div>` : ''}
                                 <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}', '${cardId}')">📏 Bedenini Bul</button>
                             </div>
                         </div>

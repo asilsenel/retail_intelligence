@@ -2,9 +2,9 @@
 SQLAlchemy database models for FitEngine API.
 """
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, ForeignKey, Integer, Text
+    Column, String, Boolean, DateTime, ForeignKey, Integer, Text, Float
 )
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -16,6 +16,22 @@ from app.config import settings
 _engine = None
 _async_session = None
 
+
+def _ensure_async_db_url(url: str) -> str:
+    """Force async driver in DB URL when possible."""
+    if not url:
+        return url
+    lowered = url.lower()
+    if "+asyncpg://" in lowered:
+        return url
+    if lowered.startswith("postgresql+psycopg2://"):
+        return "postgresql+asyncpg://" + url.split("://", 1)[1]
+    if lowered.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + url.split("://", 1)[1]
+    if lowered.startswith("postgres://"):
+        return "postgresql+asyncpg://" + url.split("://", 1)[1]
+    return url
+
 Base = declarative_base()
 
 
@@ -24,7 +40,17 @@ def get_engine():
     global _engine
     if _engine is None:
         from sqlalchemy.ext.asyncio import create_async_engine
-        _engine = create_async_engine(settings.database_url, echo=not settings.is_production)
+        db_url = _ensure_async_db_url(settings.database_url)
+        if db_url != settings.database_url:
+            # Log only once at init
+            print("WARNING: DATABASE_URL is not async; forcing asyncpg driver.")
+        from sqlalchemy.pool import NullPool
+        _engine = create_async_engine(
+            db_url,
+            echo=not settings.is_production,
+            poolclass=NullPool,
+            connect_args={"statement_cache_size": 0},
+        )
     return _engine
 
 
@@ -78,12 +104,25 @@ class Product(Base):
     __tablename__ = "products"
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
-    sku = Column(String(100), nullable=False, index=True)
+    # Tenant ID is nullable now as we might scrape external products
+    tenant_id = Column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=True, index=True)
+    
+    sku = Column(String(100), nullable=False, unique=True, index=True)  # Using stock_code as SKU
     name = Column(String(255), nullable=False)
-    fit_type = Column(String(50), nullable=False)  # slim_fit, regular_fit, loose_fit, oversized
-    fabric_composition = Column(JSONB, nullable=False)  # {"cotton": 95, "elastane": 5}
-    measurements = Column(JSONB, nullable=False)  # {"S": {"chest": 104, ...}, "M": {...}}
+    brand = Column(String(255), nullable=True)
+    price = Column(Float, nullable=True)
+    original_price = Column(Float, nullable=True)
+    url = Column(String(500), nullable=True)
+    image_url = Column(String(500), nullable=True)
+    sizes = Column(JSONB, nullable=True)  # List of available sizes
+    gender = Column(String(50), nullable=True)
+    currency = Column(String(10), default="TRY")
+    
+    # Old fields made nullable
+    fit_type = Column(String(50), nullable=True)
+    fabric_composition = Column(JSONB, nullable=True)
+    measurements = Column(JSONB, nullable=True)
+    
     category = Column(String(100))  # shirt, pants, jacket, etc.
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

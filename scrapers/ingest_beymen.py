@@ -1,560 +1,800 @@
 """
-Beymen Product Scraper for FitEngine API
-
-Scrapes product data from Beymen (Men's Shirts) and sends to FitEngine API.
-Uses Playwright for dynamic content and BeautifulSoup for parsing.
+Beymen Product Scraper using ScrapingBee and Regex.
+Extracts product data from SSR JSON (BEYMEN.productListMain) and saves to database.
 """
 import asyncio
+import hashlib
+import json
+import logging
+import os
 import re
-import httpx
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from datetime import datetime
+from typing import Dict, List, Optional
+from urllib.parse import urljoin, urlparse
+
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+import requests
+from sqlalchemy import select
+
+# Import database models
+# Adjust the import path if your project structure requires it, e.g. from app.models.database
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from app.models.database import get_session_factory, Product
+
+# Configuration
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
+TARGET_URL = "https://www.beymen.com/tr/erkek-giyim-pantolon-10119"
+API_BASE_URL = "https://app.scrapingbee.com/api/v1/"
+BASE_URL = "https://www.beymen.com"
 
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
+def fetch_html(url: str, render_js: bool = False) -> Optional[str]:
+    """
+    Fetch HTML content using ScrapingBee API.
+    """
+    if not SCRAPINGBEE_API_KEY:
+        logger.error("SCRAPINGBEE_API_KEY not found in environment variables.")
+        return None
 
-API_BASE_URL = "http://localhost:8000"
-API_KEY = "test-api-key"
-
-# Sample Beymen product URLs - Replace with real URLs
-PRODUCT_URLS = [
-    # Men's Shirts - Replace these with actual Beymen product URLs
-    "https://www.beymen.com/p/beymen-club-slim-fit-klasik-yaka-gomlek-123456",
-    "https://www.beymen.com/p/beymen-club-regular-fit-gomlek-789012",
-    "https://www.beymen.com/p/network-slim-fit-pamuklu-gomlek-345678",
-]
-
-# =============================================================================
-# FALLBACK SIZE CHARTS (When website doesn't provide one)
-# =============================================================================
-
-FALLBACK_SIZE_CHARTS = {
-    "beymen club": {
-        "S": {"chest_width": 102, "length": 72, "shoulder_width": 44},
-        "M": {"chest_width": 108, "length": 74, "shoulder_width": 46},
-        "L": {"chest_width": 114, "length": 76, "shoulder_width": 48},
-        "XL": {"chest_width": 120, "length": 78, "shoulder_width": 50},
-        "XXL": {"chest_width": 126, "length": 80, "shoulder_width": 52},
-    },
-    "network": {
-        "S": {"chest_width": 100, "length": 71, "shoulder_width": 43},
-        "M": {"chest_width": 106, "length": 73, "shoulder_width": 45},
-        "L": {"chest_width": 112, "length": 75, "shoulder_width": 47},
-        "XL": {"chest_width": 118, "length": 77, "shoulder_width": 49},
-    },
-    "default": {
-        "S": {"chest_width": 104, "length": 72, "shoulder_width": 44},
-        "M": {"chest_width": 110, "length": 74, "shoulder_width": 46},
-        "L": {"chest_width": 116, "length": 76, "shoulder_width": 48},
-        "XL": {"chest_width": 122, "length": 78, "shoulder_width": 50},
+    params = {
+        "api_key": SCRAPINGBEE_API_KEY,
+        "url": url,
+        # SSR data is usually in script tag. If not found, we'll retry with JS render.
+        "render_js": "true" if render_js else "false",
+        "premium_proxy": "true",
+        "country_code": "tr",
     }
-}
-
-
-# =============================================================================
-# DATA CLASSES
-# =============================================================================
-
-@dataclass
-class ProductData:
-    """Scraped product data"""
-    url: str
-    title: str
-    brand: str
-    price: Optional[str]
-    image_url: Optional[str]
-    fabric_composition: Dict[str, float]
-    measurements: Dict[str, Dict[str, float]]
-    fit_type: str
-    sku: str
-
-
-# =============================================================================
-# FABRIC COMPOSITION PARSER
-# =============================================================================
-
-def parse_fabric_composition(text: str) -> Dict[str, float]:
-    """
-    Parse fabric composition from Turkish text.
-    
-    Examples:
-        "%97 Pamuk, %3 Elastan" -> {"cotton": 97, "elastane": 3}
-        "100% Cotton" -> {"cotton": 100}
-    """
-    fabric_mapping = {
-        "pamuk": "cotton",
-        "cotton": "cotton",
-        "elastan": "elastane",
-        "elastane": "elastane",
-        "polyester": "polyester",
-        "viskon": "viscose",
-        "viscose": "viscose",
-        "keten": "linen",
-        "linen": "linen",
-        "yün": "wool",
-        "wool": "wool",
-        "ipek": "silk",
-        "silk": "silk",
-        "naylon": "nylon",
-        "nylon": "nylon",
-        "likra": "lycra",
-        "lycra": "lycra",
-        "spandex": "spandex",
-    }
-    
-    composition = {}
-    
-    # Pattern: %97 Pamuk or 97% Cotton
-    pattern = r'[%]?\s*(\d+)\s*[%]?\s*([a-zA-ZığüşöçĞÜŞÖÇİ]+)'
-    matches = re.findall(pattern, text, re.IGNORECASE)
-    
-    for percentage, fabric in matches:
-        fabric_lower = fabric.lower()
-        for tr_name, en_name in fabric_mapping.items():
-            if tr_name in fabric_lower:
-                composition[en_name] = float(percentage)
-                break
-    
-    # If nothing found, assume 100% cotton
-    if not composition:
-        composition = {"cotton": 100}
-    
-    return composition
-
-
-# =============================================================================
-# FIT TYPE DETECTOR
-# =============================================================================
-
-def detect_fit_type(title: str, description: str = "") -> str:
-    """Detect fit type from product title and description."""
-    text = (title + " " + description).lower()
-    
-    if "slim fit" in text or "slim-fit" in text or "dar kalıp" in text:
-        return "slim_fit"
-    elif "regular fit" in text or "regular-fit" in text or "normal kalıp" in text:
-        return "regular_fit"
-    elif "loose" in text or "oversize" in text or "bol kalıp" in text:
-        return "loose_fit"
-    elif "relaxed" in text:
-        return "loose_fit"
-    else:
-        return "regular_fit"  # Default
-
-
-# =============================================================================
-# SIZE CHART PARSER
-# =============================================================================
-
-def parse_size_chart_table(html: str) -> Dict[str, Dict[str, float]]:
-    """
-    Parse size chart HTML table into structured measurements.
-    
-    Returns:
-        {"S": {"chest_width": 104, "length": 72}, "M": {...}}
-    """
-    soup = BeautifulSoup(html, 'html.parser')
-    measurements = {}
-    
-    # Find table
-    table = soup.find('table')
-    if not table:
-        return {}
-    
-    # Get headers
-    headers = []
-    header_row = table.find('tr')
-    if header_row:
-        for th in header_row.find_all(['th', 'td']):
-            headers.append(th.get_text(strip=True).lower())
-    
-    # Map Turkish headers to English keys
-    header_mapping = {
-        "beden": "size",
-        "size": "size",
-        "göğüs": "chest_width",
-        "chest": "chest_width",
-        "göğüs genişliği": "chest_width",
-        "boy": "length",
-        "length": "length",
-        "uzunluk": "length",
-        "omuz": "shoulder_width",
-        "shoulder": "shoulder_width",
-        "omuz genişliği": "shoulder_width",
-        "kol": "sleeve_length",
-        "sleeve": "sleeve_length",
-        "bel": "waist",
-        "waist": "waist",
-    }
-    
-    # Parse rows
-    rows = table.find_all('tr')[1:]  # Skip header
-    for row in rows:
-        cells = row.find_all(['td', 'th'])
-        if len(cells) < 2:
-            continue
-        
-        size_code = None
-        size_measurements = {}
-        
-        for i, cell in enumerate(cells):
-            if i >= len(headers):
-                break
-            
-            header = headers[i]
-            value = cell.get_text(strip=True)
-            
-            # Map header to key
-            key = header_mapping.get(header, header)
-            
-            if key == "size":
-                size_code = value.upper()
-            else:
-                # Try to parse as number
-                try:
-                    # Handle "104-106" ranges by taking first value
-                    if "-" in value:
-                        value = value.split("-")[0]
-                    size_measurements[key] = float(re.sub(r'[^\d.]', '', value))
-                except ValueError:
-                    pass
-        
-        if size_code and size_measurements:
-            measurements[size_code] = size_measurements
-    
-    return measurements
-
-
-# =============================================================================
-# PRODUCT SCRAPER
-# =============================================================================
-
-async def scrape_product(page: Page, url: str) -> Optional[ProductData]:
-    """
-    Scrape a single product from Beymen.
-    
-    Returns ProductData or None if scraping fails.
-    """
-    print(f"  📦 Scraping: {url}")
+    if render_js:
+        params["wait"] = "5000"
     
     try:
-        # Navigate to product page
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2000)  # Wait for JS to load
-        
-        # Extract basic info
-        title = ""
-        brand = ""
-        price = ""
-        image_url = ""
-        fabric_text = ""
-        
-        # Title
-        title_el = await page.query_selector('h1.o-productDetail__title, h1[data-testid="product-name"]')
-        if title_el:
-            title = await title_el.inner_text()
-        
-        # Brand
-        brand_el = await page.query_selector('.o-productDetail__brand, [data-testid="product-brand"]')
-        if brand_el:
-            brand = await brand_el.inner_text()
-        
-        # Price
-        price_el = await page.query_selector('.m-price__current, [data-testid="product-price"]')
-        if price_el:
-            price = await price_el.inner_text()
-        
-        # Image
-        img_el = await page.query_selector('.o-productDetail__image img, [data-testid="product-image"]')
-        if img_el:
-            image_url = await img_el.get_attribute('src') or ""
-        
-        # Fabric composition from description
-        desc_el = await page.query_selector('.o-productDetail__description, [data-testid="product-description"]')
-        if desc_el:
-            desc_text = await desc_el.inner_text()
-            fabric_text = desc_text
-        
-        # Also check product details section
-        details_el = await page.query_selector('.o-productDetail__details, [data-testid="product-details"]')
-        if details_el:
-            details_text = await details_el.inner_text()
-            if "%" in details_text:
-                fabric_text = details_text
-        
-        # Parse fabric
-        fabric_composition = parse_fabric_composition(fabric_text)
-        
-        # Detect fit type
-        fit_type = detect_fit_type(title, fabric_text)
-        
-        # Try to get size chart
-        measurements = {}
-        
-        try:
-            # Look for size chart button
-            size_btn = await page.query_selector(
-                'button:has-text("Beden Tablosu"), '
-                'a:has-text("Beden Tablosu"), '
-                '[data-testid="size-chart-button"]'
-            )
-            
-            if size_btn:
-                await size_btn.click()
-                await page.wait_for_timeout(1500)
-                
-                # Wait for modal
-                modal = await page.query_selector('.size-chart-modal, .o-modal, [data-testid="size-chart-modal"]')
-                if modal:
-                    modal_html = await modal.inner_html()
-                    measurements = parse_size_chart_table(modal_html)
-                    
-                    # Close modal
-                    close_btn = await page.query_selector('.o-modal__close, [data-testid="close-modal"]')
-                    if close_btn:
-                        await close_btn.click()
-                
-        except PlaywrightTimeout:
-            print(f"    ⚠️  Size chart modal not found, using fallback")
-        except Exception as e:
-            print(f"    ⚠️  Error getting size chart: {e}")
-        
-        # Use fallback if no measurements found
-        if not measurements:
-            brand_lower = brand.lower() if brand else "default"
-            for key in FALLBACK_SIZE_CHARTS:
-                if key in brand_lower:
-                    measurements = FALLBACK_SIZE_CHARTS[key]
-                    print(f"    ℹ️  Using fallback size chart for '{key}'")
-                    break
-            else:
-                measurements = FALLBACK_SIZE_CHARTS["default"]
-                print(f"    ℹ️  Using default fallback size chart")
-        
-        # Generate SKU from URL
-        sku = url.split("/")[-1][:50] or f"beymen-{hash(url) % 10000}"
-        
-        # Use placeholder data if title is empty (demo mode)
-        if not title:
-            title = f"Demo Shirt {sku[:10]}"
-            brand = "Beymen Club"
-            print(f"    ⚠️  Using demo data (page structure may have changed)")
-        
-        return ProductData(
-            url=url,
-            title=title.strip(),
-            brand=brand.strip() if brand else "Beymen Club",
-            price=price.strip() if price else None,
-            image_url=image_url,
-            fabric_composition=fabric_composition,
-            measurements=measurements,
-            fit_type=fit_type,
-            sku=sku
-        )
-        
+        logger.info(f"Fetching URL: {url} via ScrapingBee...")
+        response = requests.get(API_BASE_URL, params=params, timeout=60)
+        response.raise_for_status()
+        return response.text
     except Exception as e:
-        print(f"    ❌ Error scraping {url}: {e}")
+        logger.error(f"Error fetching URL: {e}")
         return None
 
 
-# =============================================================================
-# API CLIENT
-# =============================================================================
-
-async def ingest_to_api(product: ProductData) -> bool:
+def save_debug_html(html: str, label: str) -> Optional[str]:
     """
-    Send product data to FitEngine API.
-    
-    Returns True if successful.
+    Save raw HTML to disk for debugging (e.g., captcha or structural changes).
     """
-    payload = {
-        "sku": product.sku,
-        "name": product.title,
-        "fit_type": product.fit_type,
-        "fabric_composition": product.fabric_composition,
-        "measurements": product.measurements
-    }
-    
+    if not html:
+        return None
+    safe_label = re.sub(r"[^a-z0-9]+", "_", (label or "error").lower()).strip("_") or "error"
+    filename = f"debug_beymen_error_{safe_label}.html"
+    path = os.path.join(os.getcwd(), filename)
+    if os.path.exists(path):
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(os.getcwd(), f"debug_beymen_error_{safe_label}_{ts}.html")
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{API_BASE_URL}/api/v1/ingest-product",
-                json=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-API-Key": API_KEY
-                },
-                timeout=10.0
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        logger.warning(f"Saved debug HTML to {path}")
+        return path
+    except Exception as e:
+        logger.error(f"Failed to save debug HTML: {e}")
+        return None
+
+
+def _extract_balanced(text: str, start_index: int, open_char: str, close_char: str) -> Optional[str]:
+    """
+    Extract a balanced JSON-like substring starting at start_index (which should be open_char).
+    Handles strings and escapes to avoid premature closing.
+    """
+    if start_index < 0 or start_index >= len(text) or text[start_index] != open_char:
+        return None
+
+    depth = 0
+    in_string = False
+    string_char = ""
+    escape = False
+    start = None
+
+    for i in range(start_index, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == string_char:
+                in_string = False
+            continue
+
+        if ch in ("'", '"'):
+            in_string = True
+            string_char = ch
+            continue
+
+        if ch == open_char:
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == close_char:
+            depth -= 1
+            if depth == 0 and start is not None:
+                return text[start:i + 1]
+
+    return None
+
+
+def _safe_json_loads(payload: str) -> Optional[object]:
+    """
+    Attempt to parse JSON with minor cleanup for trailing commas.
+    """
+    if not payload:
+        return None
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError:
+        cleaned = re.sub(r",\s*([}\]])", r"\1", payload)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+
+def _ensure_abs_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    if url.startswith("//"):
+        return f"https:{url}"
+    return urljoin(BASE_URL, url)
+
+
+def _derive_sku(url: Optional[str], name: Optional[str]) -> Optional[str]:
+    if url:
+        match = re.search(r"(\d{5,})", url)
+        if match:
+            return f"beymen-{match.group(1)}"
+        parsed = urlparse(url)
+        slug = parsed.path.strip("/").split("/")[-1]
+        if slug:
+            return f"beymen-{slug}"
+    if name:
+        slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        if slug:
+            return f"beymen-{slug}"
+    seed = (url or "") + "|" + (name or "")
+    if seed.strip("|"):
+        digest = hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
+        return f"beymen-{digest}"
+    return None
+
+
+def _normalize_price_string(value: str) -> Optional[float]:
+    if not value:
+        return None
+    cleaned = re.sub(r"[^\d,\\.]", "", value)
+    if not cleaned:
+        return None
+    if cleaned.count(",") == 1 and cleaned.count(".") >= 1:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    elif cleaned.count(",") == 1 and cleaned.count(".") == 0:
+        cleaned = cleaned.replace(",", ".")
+    else:
+        cleaned = cleaned.replace(",", "")
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _parse_price(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value)
+    matches = re.findall(r"\d[\d\.,]*", text)
+    if not matches:
+        return None
+    return _normalize_price_string(matches[0])
+
+
+def _looks_like_product_list(items: object) -> bool:
+    if not isinstance(items, list) or not items:
+        return False
+    sample = items[0]
+    if not isinstance(sample, dict):
+        return False
+    return "productId" in sample or "displayName" in sample
+
+
+def _find_key_recursive(obj: object, key: str) -> Optional[object]:
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj[key]
+        for value in obj.values():
+            found = _find_key_recursive(value, key)
+            if found is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _find_key_recursive(item, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _extract_array_from_text(text: str) -> Optional[List[Dict]]:
+    """
+    Try to extract productListMain array directly from a script/text block.
+    """
+    # Method 1: Regex capture with DOTALL and whitespace-insensitive tokens
+    regex_patterns = [
+        r"BEYMEN\s*\.\s*productListMain\s*=\s*(\[[\s\S]*?\])\s*;",
+        r"window\s*\.\s*BEYMEN\s*\.\s*productListMain\s*=\s*(\[[\s\S]*?\])\s*;",
+        r"productListMain\s*[:=]\s*(\[[\s\S]*?\])",
+    ]
+    for pattern in regex_patterns:
+        match = re.search(pattern, text, flags=re.DOTALL)
+        if not match:
+            continue
+        items = _safe_json_loads(match.group(1))
+        if _looks_like_product_list(items):
+            return items
+
+    # Fallback: balanced bracket extraction (more robust for nested data)
+    start_patterns = [
+        r"BEYMEN\s*\.\s*productListMain\s*=\s*\[",
+        r"window\s*\.\s*BEYMEN\s*\.\s*productListMain\s*=\s*\[",
+        r"productListMain\s*[:=]\s*\[",
+    ]
+    for pattern in start_patterns:
+        for match in re.finditer(pattern, text, flags=re.DOTALL):
+            array_start = match.end() - 1
+            array_str = _extract_balanced(text, array_start, "[", "]")
+            items = _safe_json_loads(array_str)
+            if _looks_like_product_list(items):
+                return items
+    return None
+
+
+def _extract_object_assignment(text: str, var_name: str) -> Optional[object]:
+    """
+    Extract JSON object assigned to a variable (e.g., window.BEYMEN = {...};).
+    """
+    patterns = [
+        rf"{re.escape(var_name)}\s*=\s*\{{",
+        rf"window\.{re.escape(var_name)}\s*=\s*\{{",
+        rf"var\s+{re.escape(var_name)}\s*=\s*\{{",
+        rf"let\s+{re.escape(var_name)}\s*=\s*\{{",
+        rf"const\s+{re.escape(var_name)}\s*=\s*\{{",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        obj_start = text.find("{", match.end() - 1)
+        obj_str = _extract_balanced(text, obj_start, "{", "}")
+        obj = _safe_json_loads(obj_str)
+        if obj is not None:
+            return obj
+    return None
+
+
+def _find_item_lists(obj: object, results: List[Dict]) -> None:
+    if isinstance(obj, dict):
+        obj_type = str(obj.get("@type", "")).lower()
+        if obj_type == "itemlist":
+            results.append(obj)
+        for value in obj.values():
+            _find_item_lists(value, results)
+    elif isinstance(obj, list):
+        for item in obj:
+            _find_item_lists(item, results)
+
+
+def _extract_ld_json_products(soup: BeautifulSoup) -> List[Dict]:
+    products: List[Dict] = []
+    scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
+    for script in scripts:
+        payload = script.get_text()
+        data = _safe_json_loads(payload)
+        if data is None:
+            continue
+        itemlists: List[Dict] = []
+        _find_item_lists(data, itemlists)
+        for itemlist in itemlists:
+            elements = itemlist.get("itemListElement") or []
+            if isinstance(elements, (dict, str)):
+                elements = [elements]
+            if not isinstance(elements, list):
+                continue
+            for el in elements:
+                item = None
+                if isinstance(el, dict):
+                    item = el.get("item") or el
+                elif isinstance(el, str):
+                    item = {"url": el}
+                if not isinstance(item, dict):
+                    continue
+                product = _normalize_ld_json_item(item)
+                if product:
+                    products.append(product)
+    return products
+
+
+def _normalize_ld_json_item(item: Dict) -> Optional[Dict]:
+    name = item.get("name") or item.get("title")
+    url = item.get("url") or item.get("@id")
+    image = item.get("image")
+    if isinstance(image, dict):
+        image = image.get("url")
+    elif isinstance(image, list) and image:
+        image = image[0].get("url") if isinstance(image[0], dict) else image[0]
+
+    brand = item.get("brand")
+    if isinstance(brand, dict):
+        brand = brand.get("name")
+
+    offers = item.get("offers") or {}
+    if isinstance(offers, list) and offers:
+        offers = offers[0]
+    if isinstance(offers, str):
+        offers = {}
+
+    price = offers.get("price") or offers.get("lowPrice") or offers.get("highPrice")
+    currency = offers.get("priceCurrency") or "TRY"
+
+    sku = item.get("sku") or item.get("mpn") or item.get("productId")
+    sku = sku or _derive_sku(url, name)
+
+    if not sku or not (name or url):
+        return None
+
+    return {
+        "sku": sku,
+        "name": name,
+        "brand": brand,
+        "price": _parse_price(price),
+        "original_price": None,
+        "url": _ensure_abs_url(url),
+        "image_url": _ensure_abs_url(image),
+        "sizes": [],
+        "category": None,
+        "gender": None,
+        "currency": currency or "TRY",
+    }
+
+
+def _text_content(el) -> Optional[str]:
+    if not el:
+        return None
+    text = " ".join(el.stripped_strings)
+    return text or None
+
+
+def _extract_text_from_selectors(root, selectors: List[str]) -> Optional[str]:
+    for sel in selectors:
+        el = root.select_one(sel)
+        text = _text_content(el)
+        if text:
+            return text
+    return None
+
+
+def _extract_attr_from_selectors(root, selectors: List[str], attr: str) -> Optional[str]:
+    for sel in selectors:
+        el = root.select_one(sel)
+        if el and el.get(attr):
+            return el.get(attr)
+    return None
+
+
+def _normalize_srcset(srcset: Optional[str]) -> Optional[str]:
+    if not srcset:
+        return None
+    # Take the first URL in srcset
+    first = srcset.split(",")[0].strip()
+    return first.split(" ")[0].strip() if first else None
+
+
+def _extract_html_products(soup: BeautifulSoup) -> List[Dict]:
+    products: List[Dict] = []
+    selectors = [
+        ".m-productCard",
+        ".o-productList__item",
+        ".o-productList__itemWrapper",
+    ]
+    cards = []
+    for sel in selectors:
+        cards.extend(soup.select(sel))
+
+    seen_keys = set()
+    name_selectors = [
+        ".m-productCard__name",
+        ".m-productCard__title",
+        ".m-productCard__productName",
+        ".o-productList__itemName",
+        ".product-card-title",
+        ".product-name",
+    ]
+    brand_selectors = [
+        ".m-productCard__brand",
+        ".o-productList__itemBrand",
+        ".product-card-brand",
+    ]
+    price_selectors = [
+        ".m-price__new",
+        ".m-price__current",
+        ".m-productCard__price",
+        ".o-productList__itemPrice",
+        ".m-productCard__price--sale",
+    ]
+    old_price_selectors = [
+        ".m-price__old",
+        ".m-price__original",
+        ".m-productCard__price--old",
+        ".o-productList__itemPrice--old",
+    ]
+    for card in cards:
+        link_el = card.select_one("a[href]")
+        url = link_el.get("href") if link_el else None
+        url = _ensure_abs_url(url)
+
+        name = card.get("data-product-name") or _extract_text_from_selectors(card, name_selectors)
+        if not name and link_el:
+            name = link_el.get("title")
+
+        brand = card.get("data-brand") or _extract_text_from_selectors(card, brand_selectors)
+
+        price_text = (
+            card.get("data-price")
+            or card.get("data-product-price")
+            or _extract_text_from_selectors(card, price_selectors)
+        )
+        old_price_text = (
+            card.get("data-old-price")
+            or card.get("data-product-old-price")
+            or _extract_text_from_selectors(card, old_price_selectors)
+        )
+
+        price = _parse_price(price_text)
+        original_price = _parse_price(old_price_text)
+
+        image_url = None
+        img = card.select_one("img")
+        if img:
+            image_url = (
+                img.get("data-src")
+                or img.get("data-original")
+                or img.get("data-lazy")
+                or img.get("src")
             )
-            
-            if response.status_code == 201:
-                data = response.json()
-                print(f"    ✅ Ingested: {product.title[:40]}... → ID: {data['product_id']}")
-                return True
-            else:
-                print(f"    ❌ API Error {response.status_code}: {response.text}")
-                return False
-                
-    except httpx.RequestError as e:
-        print(f"    ❌ Connection error: {e}")
+            if not image_url and img.get("srcset"):
+                image_url = _normalize_srcset(img.get("srcset"))
+        if not image_url:
+            source = card.select_one("source")
+            if source:
+                image_url = (
+                    source.get("data-srcset")
+                    or source.get("srcset")
+                    or source.get("data-src")
+                )
+                image_url = _normalize_srcset(image_url)
+
+        image_url = _ensure_abs_url(image_url)
+        sku = _derive_sku(url, name)
+
+        if not sku or not (name or url):
+            continue
+        key = sku or url
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        products.append(
+            {
+                "sku": sku,
+                "name": name,
+                "brand": brand,
+                "price": price,
+                "original_price": original_price,
+                "url": url,
+                "image_url": image_url,
+                "sizes": [],
+                "category": None,
+                "gender": None,
+                "currency": "TRY",
+            }
+        )
+    return products
+
+
+def extract_json_data(html: str) -> List[Dict]:
+    """
+    Extract products using multiple strategies (productListMain, LD-JSON, HTML fallback).
+    """
+    # Strategy 1: Direct extraction from raw HTML
+    direct_items = _extract_array_from_text(html)
+    if direct_items:
+        logger.info("Found product list via direct BEYMEN/productListMain assignment.")
+        return direct_items
+
+    logger.warning("Regex match failed for BEYMEN.productListMain. Trying alternative extraction...")
+
+    # Strategy 2: Parse script tags with BeautifulSoup
+    soup = BeautifulSoup(html, "lxml")
+
+    # Next.js style data
+    next_data = soup.find("script", id="__NEXT_DATA__")
+    if next_data:
+        payload = next_data.get_text()
+        data = _safe_json_loads(payload)
+        found = _find_key_recursive(data, "productListMain")
+        if _looks_like_product_list(found):
+            logger.info("Found product list via __NEXT_DATA__.")
+            return found
+
+    # Any application/json script tags
+    for script in soup.find_all("script", attrs={"type": "application/json"}):
+        payload = script.get_text()
+        data = _safe_json_loads(payload)
+        found = _find_key_recursive(data, "productListMain")
+        if _looks_like_product_list(found):
+            logger.info("Found product list via application/json script.")
+            return found
+
+    # Scan inline scripts for productListMain
+    for script in soup.find_all("script"):
+        payload = script.get_text()
+        if not payload or "productListMain" not in payload:
+            continue
+        items = _extract_array_from_text(payload)
+        if items:
+            logger.info("Found product list via inline script scan.")
+            return items
+        # Try common state containers
+        for var_name in ("__INITIAL_STATE__", "__PRELOADED_STATE__", "BEYMEN"):
+            state = _extract_object_assignment(payload, var_name)
+            found = _find_key_recursive(state, "productListMain")
+            if _looks_like_product_list(found):
+                logger.info(f"Found product list via {var_name} state.")
+                return found
+
+    # Method 2: LD-JSON ItemList extraction
+    ld_products = _extract_ld_json_products(soup)
+    if ld_products:
+        logger.info("Found product list via LD-JSON ItemList.")
+        return ld_products
+
+    # Method 3: HTML parsing fallback
+    html_products = _extract_html_products(soup)
+    if html_products:
+        logger.info("Found product list via HTML product cards.")
+        return html_products
+
+    if "productListMain" not in html:
+        logger.warning("productListMain not found in HTML. Site structure may have changed.")
+    return []
+
+
+def process_product(item: Dict) -> Optional[Dict]:
+    """
+    Map raw JSON item to database schema dict.
+    """
+    try:
+        if not isinstance(item, dict):
+            return None
+
+        # Branch 1: Beymen productListMain schema
+        if "productId" in item or "displayName" in item:
+            url_suffix = item.get("url", "")
+            full_url = _ensure_abs_url(url_suffix)
+
+            images = item.get("images", [])
+            image_url = None
+            if images and isinstance(images, list):
+                first = images[0] if images else None
+                if isinstance(first, dict):
+                    image_url = first.get("url") or first.get("imageUrl")
+                elif isinstance(first, str):
+                    image_url = first
+            image_url = _ensure_abs_url(image_url)
+
+            # Sizes
+            size_list = []
+            raw_sizes = item.get("sizes", [])
+            if isinstance(raw_sizes, list):
+                for s in raw_sizes:
+                    if isinstance(s, dict) and s.get("inStock"):
+                        size_list.append(s.get("sizeName"))
+
+            price = _parse_price(item.get("actualPrice"))
+            original_price = _parse_price(item.get("originalPrice"))
+
+            sku = item.get("productId") or _derive_sku(full_url, item.get("displayName"))
+
+            product_data = {
+                "sku": sku,
+                "name": item.get("displayName"),
+                "brand": item.get("brandName"),
+                "price": price,
+                "original_price": original_price,
+                "url": full_url,
+                "image_url": image_url,
+                "sizes": size_list,
+                "category": item.get("categoryName") or item.get("category"),
+                "gender": item.get("gender"),
+                "currency": "TRY",
+                "stock_code": item.get("productId"),
+            }
+            return product_data
+
+        # Branch 2: Normalized fallback schema (LD-JSON / HTML)
+        name = item.get("name") or item.get("displayName")
+        url = _ensure_abs_url(item.get("url"))
+        image_url = _ensure_abs_url(item.get("image_url") or item.get("image"))
+        brand = item.get("brand") or item.get("brandName")
+        price = _parse_price(item.get("price") or item.get("actualPrice"))
+        original_price = _parse_price(item.get("original_price") or item.get("originalPrice"))
+        sku = item.get("sku") or item.get("productId") or _derive_sku(url, name)
+        sizes = item.get("sizes") if isinstance(item.get("sizes"), list) else []
+        category = item.get("category") or item.get("categoryName")
+        gender = item.get("gender")
+        currency = item.get("currency") or "TRY"
+
+        if not sku or not name:
+            return None
+
+        return {
+            "sku": sku,
+            "name": name,
+            "brand": brand,
+            "price": price,
+            "original_price": original_price,
+            "url": url,
+            "image_url": image_url,
+            "sizes": sizes,
+            "category": category,
+            "gender": gender,
+            "currency": currency,
+            "stock_code": item.get("productId") or sku,
+        }
+    except Exception as e:
+        fallback_id = item.get("productId") if isinstance(item, dict) else None
+        logger.error(f"Error processing item {fallback_id}: {e}")
+        return None
+
+
+async def save_product(session, data: Dict) -> bool:
+    """
+    Upsert product into database.
+    """
+    sku = data.get("sku")
+    if not sku:
         return False
 
+    # Check if exists
+    stmt = select(Product).where(Product.sku == sku)
+    result = await session.execute(stmt)
+    existing = result.scalar_one_or_none()
 
-# =============================================================================
-# MAIN PIPELINE
-# =============================================================================
-
-async def run_pipeline(urls: List[str]) -> Dict[str, Any]:
-    """
-    Run the complete scraping and ingestion pipeline.
-    
-    Returns summary statistics.
-    """
-    print("\n" + "="*60)
-    print("🚀 FitEngine - Beymen Product Ingestion Pipeline")
-    print("="*60 + "\n")
-    
-    stats = {
-        "total": len(urls),
-        "scraped": 0,
-        "ingested": 0,
-        "failed": 0
-    }
-    
-    async with async_playwright() as p:
-        # Launch browser
-        print("🌐 Launching browser...")
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+    if existing:
+        # Update
+        existing.name = data["name"]
+        existing.brand = data["brand"]
+        existing.price = data["price"]
+        existing.original_price = data["original_price"]
+        existing.url = data["url"]
+        existing.image_url = data["image_url"]
+        existing.sizes = data["sizes"]
+        existing.category = data["category"]
+        existing.gender = data["gender"]
+        existing.currency = data["currency"]
+        logger.info(f"Updated product: {sku}")
+    else:
+        # Insert
+        new_product = Product(
+            sku=sku,
+            name=data["name"],
+            brand=data["brand"],
+            price=data["price"],
+            original_price=data["original_price"],
+            url=data["url"],
+            image_url=data["image_url"],
+            sizes=data["sizes"],
+            category=data["category"],
+            gender=data["gender"],
+            currency=data["currency"],
+            # Nullable fields
+            fit_type=None,
+            fabric_composition=None,
+            measurements=None,
+            tenant_id=None
         )
-        page = await context.new_page()
-        
-        print(f"\n📋 Processing {len(urls)} products...\n")
-        
-        for i, url in enumerate(urls, 1):
-            print(f"[{i}/{len(urls)}] Processing...")
-            
-            # Scrape product
-            product = await scrape_product(page, url)
-            
-            if product:
-                stats["scraped"] += 1
-                
-                # Ingest to API
-                success = await ingest_to_api(product)
-                if success:
-                    stats["ingested"] += 1
+        session.add(new_product)
+        logger.info(f"Created product: {sku}")
+
+    return True
+
+
+async def run_pipeline():
+    """
+    Main entry point.
+    """
+    logger.info("Starting Beymen Scraper Pipeline...")
+    
+    html = fetch_html(TARGET_URL, render_js=False)
+    if not html:
+        logger.error("Failed to retrieve HTML.")
+        return
+
+    try:
+        products_data = extract_json_data(html)
+    except Exception as e:
+        logger.error(f"Extraction error (SSR): {e}")
+        save_debug_html(html, "ssr_parse_error")
+        products_data = []
+    logger.info(f"Extracted {len(products_data)} products from extraction.")
+
+    if not products_data:
+        save_debug_html(html, "ssr_no_products")
+        logger.warning("No products found in SSR HTML. Retrying with JS rendering...")
+        html = fetch_html(TARGET_URL, render_js=True)
+        if html:
+            try:
+                products_data = extract_json_data(html)
+            except Exception as e:
+                logger.error(f"Extraction error (JS): {e}")
+                save_debug_html(html, "js_parse_error")
+                products_data = []
+            logger.info(f"Extracted {len(products_data)} products from JS-rendered HTML.")
+
+    if not products_data:
+        if html:
+            save_debug_html(html, "js_no_products")
+        return
+
+    # Database Session — use a fresh session per product to avoid
+    # asyncpg prepared-statement pollution after rollback.
+    session_factory = get_session_factory()
+    success_count = 0
+    failed_count = 0
+    skipped_count = 0
+    first_db_error_logged = False
+    for item in products_data:
+        clean_data = process_product(item)
+        if not clean_data:
+            skipped_count += 1
+            continue
+
+        sku = clean_data.get("sku")
+        try:
+            async with session_factory() as session:
+                async with session.begin():
+                    saved = await save_product(session, clean_data)
+                if saved:
+                    success_count += 1
                 else:
-                    stats["failed"] += 1
+                    skipped_count += 1
+        except Exception as e:
+            failed_count += 1
+            if not first_db_error_logged:
+                first_db_error_logged = True
+                logger.exception(f"First DB error on SKU {sku}: {e}")
             else:
-                stats["failed"] += 1
-            
-            print()
-        
-        await browser.close()
-    
-    # Print summary
-    print("\n" + "="*60)
-    print("📊 PIPELINE SUMMARY")
-    print("="*60)
-    print(f"  Total URLs:     {stats['total']}")
-    print(f"  Scraped:        {stats['scraped']}")
-    print(f"  Ingested:       {stats['ingested']} ✅")
-    print(f"  Failed:         {stats['failed']} ❌")
-    print("="*60 + "\n")
-    
-    if stats["ingested"] > 0:
-        print(f"🎉 Successfully ingested {stats['ingested']} products into FitEngine!\n")
-    
-    return stats
+                logger.error(f"Database error for {sku}: {e}")
 
-
-# =============================================================================
-# DEMO MODE (without real URLs)
-# =============================================================================
-
-async def run_demo():
-    """
-    Run demo ingestion with sample data (no actual scraping).
-    Use this when real URLs are not available.
-    """
-    print("\n" + "="*60)
-    print("🎭 FitEngine - DEMO MODE (No actual scraping)")
-    print("="*60 + "\n")
-    
-    demo_products = [
-        ProductData(
-            url="https://beymen.com/demo-1",
-            title="Beymen Club Slim Fit Klasik Yaka Gömlek",
-            brand="Beymen Club",
-            price="799 TL",
-            image_url="https://example.com/shirt1.jpg",
-            fabric_composition={"cotton": 97, "elastane": 3},
-            measurements=FALLBACK_SIZE_CHARTS["beymen club"],
-            fit_type="slim_fit",
-            sku="BC-SLIM-001"
-        ),
-        ProductData(
-            url="https://beymen.com/demo-2",
-            title="Beymen Club Regular Fit Oxford Gömlek",
-            brand="Beymen Club",
-            price="899 TL",
-            image_url="https://example.com/shirt2.jpg",
-            fabric_composition={"cotton": 100},
-            measurements=FALLBACK_SIZE_CHARTS["beymen club"],
-            fit_type="regular_fit",
-            sku="BC-REG-002"
-        ),
-        ProductData(
-            url="https://beymen.com/demo-3",
-            title="Network Slim Fit Pamuklu Gömlek",
-            brand="Network",
-            price="649 TL",
-            image_url="https://example.com/shirt3.jpg",
-            fabric_composition={"cotton": 95, "elastane": 5},
-            measurements=FALLBACK_SIZE_CHARTS["network"],
-            fit_type="slim_fit",
-            sku="NW-SLIM-003"
-        ),
-    ]
-    
-    stats = {"total": len(demo_products), "ingested": 0, "failed": 0}
-    
-    for product in demo_products:
-        print(f"📦 Demo product: {product.title}")
-        success = await ingest_to_api(product)
-        if success:
-            stats["ingested"] += 1
-        else:
-            stats["failed"] += 1
-    
-    print("\n" + "="*60)
-    print(f"🎉 Successfully ingested {stats['ingested']} demo products into FitEngine!")
-    print("="*60 + "\n")
-    
-    return stats
-
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
+    logger.info(
+        f"DB summary: success={success_count}, failed={failed_count}, skipped={skipped_count}"
+    )
 
 if __name__ == "__main__":
-    import sys
-    
-    if "--demo" in sys.argv:
-        # Run demo mode without actual scraping
-        asyncio.run(run_demo())
-    else:
-        # Run actual scraping pipeline
-        # Note: Replace PRODUCT_URLS with real Beymen URLs
-        print("\n⚠️  Note: Using placeholder URLs. Replace PRODUCT_URLS with real Beymen product URLs.")
-        print("   Or run with --demo flag for demo mode without scraping.\n")
-        
-        # For now, run demo mode since we have placeholder URLs
-        asyncio.run(run_demo())
+    asyncio.run(run_pipeline())

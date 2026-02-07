@@ -55,21 +55,29 @@ CREATE TRIGGER update_tenants_updated_at
 -- ============================================
 CREATE TABLE products (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
     sku VARCHAR(100) NOT NULL,
     name VARCHAR(255) NOT NULL,
-    fit_type VARCHAR(50) NOT NULL CHECK (fit_type IN ('slim_fit', 'regular_fit', 'loose_fit', 'oversized')),
-    fabric_composition JSONB NOT NULL,
+    brand VARCHAR(255),
+    price DOUBLE PRECISION,
+    original_price DOUBLE PRECISION,
+    url VARCHAR(500),
+    image_url VARCHAR(500),
+    sizes JSONB,
+    gender VARCHAR(50),
+    currency VARCHAR(10) DEFAULT 'TRY',
+    fit_type VARCHAR(50) CHECK (fit_type IN ('slim_fit', 'regular_fit', 'loose_fit', 'oversized')),
+    fabric_composition JSONB,
     -- Example: {"cotton": 95, "elastane": 5}
-    measurements JSONB NOT NULL,
+    measurements JSONB,
     -- Example: {"S": {"chest_width": 104, "length": 72}, "M": {...}}
     category VARCHAR(100),
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     
-    -- Unique SKU per tenant
-    CONSTRAINT unique_sku_per_tenant UNIQUE (tenant_id, sku)
+    -- Unique SKU (global)
+    CONSTRAINT unique_sku UNIQUE (sku)
 );
 
 -- Indexes for common queries
