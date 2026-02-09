@@ -326,6 +326,7 @@ async def get_combo_products(
     exclude_id: str,
     limit: int = 2,
     exclude_ids: set = None,
+    target_category: str = None,
 ) -> List[dict]:
     """Find complementary products for outfit combo.
 
@@ -334,9 +335,16 @@ async def get_combo_products(
         exclude_id: Single product ID to exclude (backward compat).
         limit: Max combo products to return.
         exclude_ids: Set of product IDs to exclude (e.g. all main search results).
+        target_category: If provided, only search for this specific category
+                         (e.g. "pantolon") instead of all complementary categories.
     """
     cat_lower = main_category.lower() if main_category else ""
-    target_cats = _COMBO_MAP.get(cat_lower, [])
+
+    if target_category:
+        # Filter to just one specific complementary category
+        target_cats = [target_category.lower()]
+    else:
+        target_cats = _COMBO_MAP.get(cat_lower, [])
     if not target_cats:
         return []
 
@@ -742,12 +750,23 @@ async def chat_with_ai(request: ChatRequest):
 # =============================================================================
 
 @app.get("/api/v1/products/{product_id}/combos", tags=["Products"])
-async def get_product_combos_endpoint(product_id: str, limit: int = 2):
+async def get_product_combos_endpoint(
+    product_id: str,
+    limit: int = 2,
+    target_category: Optional[str] = None,
+):
     """
     Fetch combo/complementary products for a specific product.
 
-    Used by the widget when a user selects a product or clicks
-    'Görünümü Tamamla' on a card that had no preloaded combos.
+    Args:
+        product_id: The product to find combos for.
+        limit: Max combo products to return.
+        target_category: Optional specific category to filter combos
+                         (e.g. "pantolon"). If omitted, returns from all
+                         complementary categories.
+
+    Returns combo_categories: list of all possible complementary categories
+    so the widget can show category picker buttons.
     """
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -756,15 +775,25 @@ async def get_product_combos_endpoint(product_id: str, limit: int = 2):
         product = result.scalars().first()
 
     if not product:
-        return {"combos": [], "product_id": product_id, "category": None}
+        return {"combos": [], "product_id": product_id, "category": None, "combo_categories": []}
 
     p_dict = _product_to_dict(product)
     category = p_dict.get("category") or _guess_category(p_dict["name"])
     if not category:
-        return {"combos": [], "product_id": product_id, "category": None}
+        return {"combos": [], "product_id": product_id, "category": None, "combo_categories": []}
 
-    combos = await get_combo_products(category, product_id, limit=limit)
-    return {"combos": combos, "product_id": product_id, "category": category}
+    # All possible complementary categories for this product
+    combo_categories = _COMBO_MAP.get(category.lower(), [])
+
+    combos = await get_combo_products(
+        category, product_id, limit=limit, target_category=target_category
+    )
+    return {
+        "combos": combos,
+        "product_id": product_id,
+        "category": category,
+        "combo_categories": combo_categories,
+    }
 
 
 # =============================================================================

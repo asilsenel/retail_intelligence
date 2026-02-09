@@ -33,6 +33,10 @@
     let cardCounter = 0;
     let selectedProducts = {};
     let cardProductMap = {};
+    let pickedComboCategories = {};   // productId → Set of already-picked combo categories
+    let userShoeSize = null;          // e.g. "43"
+    let pendingShoeCombo = null;      // { productId, targetCategory } — waiting for shoe size input
+    let comboParentProductId = null;  // tracks which product started the combo flow
 
     // =========================================================================
     // STYLES
@@ -367,6 +371,18 @@
 
         .bw-step-prompt-actions .bw-btn {
             flex: 1;
+        }
+
+        .bw-step-prompt-categories {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .bw-combo-cat-btn {
+            width: auto !important;
+            padding: 8px 14px !important;
+            font-size: 11px !important;
         }
 
         /* ---- Buttons ---- */
@@ -802,6 +818,10 @@
         cardCounter = 0;
         selectedProducts = {};
         cardProductMap = {};
+        pickedComboCategories = {};
+        userShoeSize = null;
+        pendingShoeCombo = null;
+        comboParentProductId = null;
         isExpanded = false;
         document.getElementById('beymen-widget-window')?.classList.remove('expanded');
 
@@ -878,7 +898,57 @@
         processInput(text);
     }
 
+    function parseShoeSize(text) {
+        const match = text.trim().match(/^(\d{2})$/);
+        if (match) {
+            const num = parseInt(match[1]);
+            if (num >= 36 && num <= 48) return String(num);
+        }
+        return null;
+    }
+
     function processInput(text) {
+        // Check if we're waiting for shoe size (combo flow)
+        if (pendingShoeCombo) {
+            const shoeSize = parseShoeSize(text);
+            if (shoeSize) {
+                userShoeSize = shoeSize;
+                addBotMessage(`Ayakkabi numaraniz: <strong>${shoeSize}</strong>`);
+                const { productId, targetCategory } = pendingShoeCombo;
+                pendingShoeCombo = null;
+                completeLookByCategory(productId, targetCategory);
+                return;
+            }
+            // If not a valid shoe size, show hint
+            addBotMessage('Lutfen gecerli bir ayakkabi numarasi girin (36-48).\n\n<em>Orn: "43"</em>');
+            return;
+        }
+
+        // Check if we're waiting for shoe size (direct shoe selection)
+        if (currentActiveProductId) {
+            const activeProduct = productsCache[currentActiveProductId];
+            if (_isShoeProduct(activeProduct)) {
+                const shoeSize = parseShoeSize(text);
+                if (shoeSize) {
+                    userShoeSize = shoeSize;
+                    addBotMessage(`Ayakkabi numaraniz: <strong>${shoeSize}</strong>`);
+                    const pid = currentActiveProductId;
+                    const comboTarget = comboParentProductId || pid;
+                    const selData = selectedProducts[pid];
+                    const cid = selData ? selData.cardId : null;
+                    currentActiveProductId = null;
+                    autoSizeForCard(pid, cid).then(() => {
+                        showSelections();
+                        promptComboStep(comboTarget);
+                    });
+                    return;
+                }
+                // If not a valid shoe size, show hint
+                addBotMessage('Lutfen gecerli bir ayakkabi numarasi girin (36-48).\n\n<em>Orn: "43"</em>');
+                return;
+            }
+        }
+
         const measurements = parseMeasurements(text);
 
         if (measurements) {
@@ -890,12 +960,13 @@
             if (currentActiveProductId) {
                 // Size step for the selected product → then combo step
                 const pid = currentActiveProductId;
+                const comboTarget = comboParentProductId || pid;
                 const selData = selectedProducts[pid];
                 const cid = selData ? selData.cardId : null;
                 currentActiveProductId = null;
                 autoSizeForCard(pid, cid).then(() => {
                     showSelections();
-                    promptComboStep(pid);
+                    promptComboStep(comboTarget);
                 });
             } else {
                 // No specific product — size all visible cards
@@ -1076,8 +1147,33 @@
     // SIZE CHECK
     // =========================================================================
 
+    function _isShoeProduct(product) {
+        if (!product) return false;
+        const cat = (product.category || '').toLowerCase();
+        const name = (product.name || '').toLowerCase();
+        const shoeKeywords = ['ayakkabı', 'ayakkabi', 'loafer', 'sneaker', 'bot', 'oxford', 'derby', 'monk'];
+        return shoeKeywords.some(k => cat.includes(k) || name.includes(k));
+    }
+
     async function autoSizeForCard(productId, cardId) {
         try {
+            const product = productsCache[productId];
+
+            // For shoe products, use the user's stated shoe size directly
+            if (_isShoeProduct(product) && userShoeSize) {
+                const syntheticData = {
+                    recommended_size: userShoeSize,
+                    confidence_score: 99,
+                    fit_description: 'User-provided shoe size',
+                    fit_description_tr: 'Kullanicinin belirttigi ayakkabi numarasi',
+                    size_breakdown: [],
+                    alternative_size: null,
+                    notes: null
+                };
+                displaySizeResult(syntheticData, cardId, productId, true);
+                return;
+            }
+
             const response = await fetch(`${CONFIG.apiUrl}/api/v1/recommend`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-API-Key': CONFIG.apiKey },
@@ -1170,17 +1266,36 @@
                     btn.innerHTML = `${ICONS.heartFill} Secildi`;
                 }
 
+                // Determine which product to show combo prompt for
+                // If user selects a combo suggestion card, continue the parent's combo flow
+                const comboPromptTarget = comboParentProductId || productId;
+
                 // Step 2: Ask for size
+                const isShoe = _isShoeProduct(product);
+
                 if (product._recommendedSize) {
                     // Size already known — go straight to combo step
                     showSelections();
-                    promptComboStep(productId);
+                    promptComboStep(comboPromptTarget);
+                } else if (isShoe && userShoeSize) {
+                    // Shoe with known shoe size — apply directly
+                    autoSizeForCard(productId, cardId).then(() => {
+                        showSelections();
+                        promptComboStep(comboPromptTarget);
+                    });
+                } else if (isShoe && !userShoeSize) {
+                    // Shoe but no shoe size — ask for it
+                    currentActiveProductId = productId;
+                    pendingShoeCombo = null; // not a combo request, just direct shoe selection
+                    showSelections();
+                    addBotMessage(`<strong>${product.name}</strong> secildi! Ayakkabi numaranizi yazar misiniz?\n\n<em>Orn: "43" veya "42"</em>`);
+                    document.getElementById('bw-input')?.focus();
                 } else if (userHeight && userWeight) {
                     // Measurements known but not calculated yet
                     addBotMessage(`Bedeninizi hesapliyorum...`);
                     autoSizeForCard(productId, cardId).then(() => {
                         showSelections();
-                        promptComboStep(productId);
+                        promptComboStep(comboPromptTarget);
                     });
                 } else {
                     // Need measurements — prompt user
@@ -1195,27 +1310,80 @@
         showSelections();
     }
 
-    function promptComboStep(productId) {
+    // Category display labels (Turkish)
+    const _CATEGORY_LABELS = {
+        'pantolon': 'Pantolon',
+        'gömlek': 'Gomlek',
+        'gomlek': 'Gomlek',
+        'kazak': 'Kazak',
+        'ayakkabı': 'Ayakkabi',
+        'ayakkabi': 'Ayakkabi',
+        'ceket': 'Ceket',
+        'blazer': 'Blazer',
+        'palto': 'Palto',
+        'mont': 'Mont',
+        'kaban': 'Kaban',
+        'parka': 'Parka',
+        'yelek': 'Yelek',
+        'pardösü': 'Pardosu',
+        'takım': 'Takim Elbise',
+        'takim': 'Takim Elbise',
+        'tişört': 'Tisort',
+    };
+
+    async function promptComboStep(productId) {
         const product = productsCache[productId];
         if (!product) return;
 
-        const html = `
-            <div class="bw-step-prompt">
-                <div class="bw-step-prompt-title">${ICONS.sparkle} Gorunumu tamamlamak ister misiniz?</div>
-                <div class="bw-step-prompt-actions">
-                    <button class="bw-btn bw-btn-primary" onclick="BeymenAI.completeLook('${productId}', null)">
-                        Kombin Onerisi
-                    </button>
-                    <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.skipCombo()">
-                        Pas Gec
-                    </button>
-                </div>
-            </div>`;
-        addBotMessage(html, true);
+        // Initialize picked set for this product
+        if (!pickedComboCategories[productId]) {
+            pickedComboCategories[productId] = new Set();
+        }
+
+        // Fetch combo categories from backend
+        try {
+            const response = await fetch(
+                `${CONFIG.apiUrl}/api/v1/products/${productId}/combos?limit=0`,
+                { headers: { 'X-API-Key': CONFIG.apiKey } }
+            );
+            if (!response.ok) return;
+            const data = await response.json();
+
+            const allCats = data.combo_categories || [];
+            const picked = pickedComboCategories[productId];
+            const remaining = allCats.filter(c => !picked.has(c));
+
+            if (remaining.length === 0) {
+                addBotMessage('Tum kombin kategorileri tamamlandi!');
+                showSelections();
+                return;
+            }
+
+            // Build category buttons
+            let buttonsHtml = remaining.map(cat => {
+                const label = _CATEGORY_LABELS[cat] || cat.charAt(0).toUpperCase() + cat.slice(1);
+                return `<button class="bw-btn bw-btn-primary bw-combo-cat-btn" onclick="BeymenAI.completeLookByCategory('${productId}', '${cat}')">${label}</button>`;
+            }).join('');
+
+            const html = `
+                <div class="bw-step-prompt">
+                    <div class="bw-step-prompt-title">Gorunumu tamamlamak icin bir kategori secin:</div>
+                    <div class="bw-step-prompt-categories">
+                        ${buttonsHtml}
+                        <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.skipCombo()">
+                            ${ICONS.cart} Sepeti Goster
+                        </button>
+                    </div>
+                </div>`;
+            addBotMessage(html, true);
+
+        } catch (e) {
+            console.error('Combo categories error:', e);
+            showSelections();
+        }
     }
 
     function skipCombo() {
-        addBotMessage('Tamam, kombin onerisini pas gectiniz. Sepetinize goz atabilirsiniz.');
         showSelections();
     }
 
@@ -1315,15 +1483,36 @@
         showSelections();
     }
 
-    async function completeLook(productId, cardId) {
+    async function completeLookByCategory(productId, targetCategory) {
         const product = productsCache[productId];
         if (!product) return;
 
-        addBotMessage(`${ICONS.sparkle} <strong>${product.brand || 'Beymen'} ${product.name}</strong> ile uyumlu urunleri ariyorum...`);
+        // Remember which product started the combo flow
+        comboParentProductId = productId;
+
+        // Track this category as picked
+        if (!pickedComboCategories[productId]) {
+            pickedComboCategories[productId] = new Set();
+        }
+        pickedComboCategories[productId].add(targetCategory);
+
+        const catLabel = _CATEGORY_LABELS[targetCategory] || targetCategory;
+
+        // Check if shoe category — ask shoe size if not known
+        const isShoeCategory = ['ayakkabı', 'ayakkabi', 'loafer'].includes(targetCategory.toLowerCase());
+        if (isShoeCategory && !userShoeSize) {
+            // Store pending combo request and ask for shoe size
+            pendingShoeCombo = { productId, targetCategory };
+            addBotMessage(`Ayakkabi numaranizi yazar misiniz?\n\n<em>Orn: "43" veya "42"</em>`);
+            document.getElementById('bw-input')?.focus();
+            return;
+        }
+
+        addBotMessage(`<strong>${catLabel}</strong> onerileri araniyor...`);
 
         try {
             const response = await fetch(
-                `${CONFIG.apiUrl}/api/v1/products/${productId}/combos?limit=3`,
+                `${CONFIG.apiUrl}/api/v1/products/${productId}/combos?limit=3&target_category=${encodeURIComponent(targetCategory)}`,
                 { headers: { 'X-API-Key': CONFIG.apiKey } }
             );
             if (!response.ok) {
@@ -1334,21 +1523,28 @@
 
             if (data.combos && data.combos.length > 0) {
                 data.combos.forEach(c => { productsCache[c.id] = c; });
-                addBotMessage(`Iste ${product.brand || 'Beymen'} ${product.name} ile harika gorunecek parcalar:`);
-                // Render each combo as a FULL product card (same cycle)
+                addBotMessage(`Iste <strong>${catLabel}</strong> onerileri:`);
                 data.combos.forEach((combo, idx) => {
                     setTimeout(() => {
                         const comboCardHtml = buildProductCard(combo);
                         addBotMessage(comboCardHtml, true);
                     }, 300 + idx * 250);
                 });
+                // Do NOT auto-prompt next combo here — wait for user to select a card
             } else {
-                addBotMessage('Bu urun icin kombin onerisi bulunamadi.');
+                addBotMessage(`Bu urun icin <strong>${catLabel}</strong> onerisi bulunamadi.`);
+                // Show remaining categories only when nothing found
+                promptComboStep(productId);
             }
         } catch (e) {
             console.error('Complete look error:', e);
             addBotMessage('Kombin onerileri yuklenemedi.');
         }
+    }
+
+    // Legacy wrapper — kept for backward compat
+    async function completeLook(productId, cardId) {
+        promptComboStep(productId);
     }
 
     function goToCart() {
@@ -1385,6 +1581,7 @@
         triggerSizeCheck,
         selectProduct,
         completeLook,
+        completeLookByCategory,
         comboFromCombo,
         skipCombo,
         addToCart,
