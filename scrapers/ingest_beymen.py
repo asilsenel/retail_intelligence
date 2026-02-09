@@ -35,36 +35,162 @@ logger = logging.getLogger(__name__)
 
 SCRAPINGBEE_API_KEY = os.getenv("SCRAPINGBEE_API_KEY")
 TARGET_URL = "https://www.beymen.com/tr/erkek-giyim-pantolon-10119"
+TARGET_URLS = [
+    "https://www.beymen.com/tr/erkek-giyim-dis-giyim-10116",
+    "https://www.beymen.com/tr/erkek-giyim-pantolon-10119",
+    "https://www.beymen.com/tr/erkek-ayakkabi-klasik-ayakkabi-10095",
+    "https://www.beymen.com/tr/erkek-giyim-takim-elbise-10123",
+    "https://www.beymen.com/tr/erkek-giyim-ceket-blazer-59906",
+]
 API_BASE_URL = "https://app.scrapingbee.com/api/v1/"
 BASE_URL = "https://www.beymen.com"
 
 
-def fetch_html(url: str, render_js: bool = False) -> Optional[str]:
+async def fetch_html(url: str, render_js: bool = False) -> Optional[str]:
     """
-    Fetch HTML content using ScrapingBee API.
+    Fetch HTML content. Tries ScrapingBee first, falls back to Playwright.
     """
-    if not SCRAPINGBEE_API_KEY:
-        logger.error("SCRAPINGBEE_API_KEY not found in environment variables.")
+    # Try ScrapingBee
+    if SCRAPINGBEE_API_KEY:
+        params = {
+            "api_key": SCRAPINGBEE_API_KEY,
+            "url": url,
+            "render_js": "true" if render_js else "false",
+            "premium_proxy": "true",
+            "country_code": "tr",
+        }
+        if render_js:
+            params["wait"] = "5000"
+
+        for attempt in range(2):
+            try:
+                logger.info(f"Fetching URL: {url} via ScrapingBee (attempt {attempt + 1})...")
+                response = requests.get(API_BASE_URL, params=params, timeout=90)
+                response.raise_for_status()
+                return response.text
+            except Exception as e:
+                logger.error(f"ScrapingBee error (attempt {attempt + 1}): {e}")
+                if attempt < 1:
+                    await asyncio.sleep(3)
+        logger.warning("ScrapingBee failed. Falling back to Playwright...")
+
+    # Fallback: Playwright (headless Chromium)
+    return await fetch_html_playwright(url)
+
+
+async def fetch_html_playwright(url: str) -> Optional[str]:
+    """Fetch HTML using local headless Playwright Chromium (async).
+
+    Also intercepts API responses to capture productListMain data
+    that may be loaded via XHR instead of embedded in HTML.
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        logger.error("Playwright not installed. Cannot use browser fallback.")
         return None
 
-    params = {
-        "api_key": SCRAPINGBEE_API_KEY,
-        "url": url,
-        # SSR data is usually in script tag. If not found, we'll retry with JS render.
-        "render_js": "true" if render_js else "false",
-        "premium_proxy": "true",
-        "country_code": "tr",
-    }
-    if render_js:
-        params["wait"] = "5000"
-    
+    captured_products = []
+
+    async def intercept_response(response):
+        """Capture API responses that contain product list data."""
+        try:
+            ct = response.headers.get("content-type", "")
+            if "json" in ct and response.status == 200:
+                resp_url = response.url
+                # Beymen product list API patterns
+                if any(kw in resp_url for kw in ["productList", "ProductList", "product-list", "catalog", "listing"]):
+                    body = await response.json()
+                    # Check if it contains productListMain-like data
+                    found = _find_key_recursive(body, "productListMain")
+                    if found and isinstance(found, list) and len(found) > 0:
+                        captured_products.extend(found)
+                        logger.info(f"Intercepted {len(found)} products from API: {resp_url[:100]}")
+                    elif isinstance(body, list) and len(body) > 0 and isinstance(body[0], dict) and "productId" in body[0]:
+                        captured_products.extend(body)
+                        logger.info(f"Intercepted {len(body)} products from direct API list: {resp_url[:100]}")
+                    elif isinstance(body, dict):
+                        # Check nested results
+                        for key in ("products", "items", "result", "data", "productListMain"):
+                            items = body.get(key)
+                            if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
+                                if "productId" in items[0] or "displayName" in items[0]:
+                                    captured_products.extend(items)
+                                    logger.info(f"Intercepted {len(items)} products from API key '{key}': {resp_url[:100]}")
+                                    break
+        except Exception:
+            pass
+
     try:
-        logger.info(f"Fetching URL: {url} via ScrapingBee...")
-        response = requests.get(API_BASE_URL, params=params, timeout=60)
-        response.raise_for_status()
-        return response.text
+        logger.info(f"Fetching URL: {url} via Playwright...")
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                locale="tr-TR",
+            )
+            page = await context.new_page()
+            page.on("response", intercept_response)
+            resp = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            if resp and resp.status >= 400:
+                logger.error(f"Playwright got HTTP {resp.status} for {url}")
+                await browser.close()
+                return None
+            await page.wait_for_timeout(8000)  # Wait for JS data injection
+
+            # Try to extract productListMain from page JS context
+            try:
+                js_data = await page.evaluate("""() => {
+                    if (window.BEYMEN && window.BEYMEN.productListMain) {
+                        var plm = window.BEYMEN.productListMain;
+                        // productListMain can be an object with .products array
+                        if (Array.isArray(plm)) {
+                            return JSON.stringify(plm);
+                        } else if (plm.products && Array.isArray(plm.products)) {
+                            return JSON.stringify(plm.products);
+                        }
+                        return JSON.stringify(plm);
+                    }
+                    if (window.__NEXT_DATA__) {
+                        return JSON.stringify(window.__NEXT_DATA__);
+                    }
+                    return null;
+                }""")
+                if js_data:
+                    logger.info(f"Extracted JS data from page context ({len(js_data)} chars)")
+            except Exception as e:
+                js_data = None
+                logger.debug(f"JS evaluation failed: {e}")
+
+            html = await page.content()
+            await browser.close()
+
+            # If we captured products via API interception, inject them into HTML
+            # as a synthetic productListMain so existing extraction logic works
+            if captured_products:
+                logger.info(f"Injecting {len(captured_products)} intercepted products into HTML")
+                inject = f'<script>window.BEYMEN = window.BEYMEN || {{}}; window.BEYMEN.productListMain = {json.dumps(captured_products, ensure_ascii=False)};</script>'
+                html = html.replace("</head>", f"{inject}</head>")
+            elif js_data:
+                # Try to parse JS data and inject
+                parsed = _safe_json_loads(js_data)
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    inject = f'<script>window.BEYMEN = window.BEYMEN || {{}}; window.BEYMEN.productListMain = {js_data};</script>'
+                    html = html.replace("</head>", f"{inject}</head>")
+                elif isinstance(parsed, dict):
+                    found = _find_key_recursive(parsed, "productListMain")
+                    if found:
+                        inject = f'<script>window.BEYMEN = window.BEYMEN || {{}}; window.BEYMEN.productListMain = {json.dumps(found, ensure_ascii=False)};</script>'
+                        html = html.replace("</head>", f"{inject}</head>")
+
+            logger.info(f"Playwright fetched {len(html)} bytes from {url}")
+            return html
     except Exception as e:
-        logger.error(f"Error fetching URL: {e}")
+        logger.error(f"Playwright error: {e}")
         return None
 
 
@@ -215,6 +341,22 @@ def _looks_like_product_list(items: object) -> bool:
     return "productId" in sample or "displayName" in sample
 
 
+def _unwrap_product_list(found: object) -> Optional[List[Dict]]:
+    """
+    Unwrap productListMain which may be:
+      - A direct list of products
+      - An object with a 'products' key containing the list
+    Returns the product list or None.
+    """
+    if _looks_like_product_list(found):
+        return found
+    if isinstance(found, dict):
+        products = found.get("products")
+        if _looks_like_product_list(products):
+            return products
+    return None
+
+
 def _find_key_recursive(obj: object, key: str) -> Optional[object]:
     if isinstance(obj, dict):
         if key in obj:
@@ -233,9 +375,12 @@ def _find_key_recursive(obj: object, key: str) -> Optional[object]:
 
 def _extract_array_from_text(text: str) -> Optional[List[Dict]]:
     """
-    Try to extract productListMain array directly from a script/text block.
+    Try to extract productListMain products from a script/text block.
+    productListMain can be either:
+      - A direct array: productListMain = [{...}, ...]
+      - An object with a 'products' key: productListMain = {products: [{...}, ...], ...}
     """
-    # Method 1: Regex capture with DOTALL and whitespace-insensitive tokens
+    # Method 1a: Direct array assignment (old format)
     regex_patterns = [
         r"BEYMEN\s*\.\s*productListMain\s*=\s*(\[[\s\S]*?\])\s*;",
         r"window\s*\.\s*BEYMEN\s*\.\s*productListMain\s*=\s*(\[[\s\S]*?\])\s*;",
@@ -249,7 +394,26 @@ def _extract_array_from_text(text: str) -> Optional[List[Dict]]:
         if _looks_like_product_list(items):
             return items
 
-    # Fallback: balanced bracket extraction (more robust for nested data)
+    # Method 1b: Object assignment — productListMain = {products: [...], ...}
+    # Use balanced bracket extraction for robustness with large objects
+    obj_patterns = [
+        r"BEYMEN\s*\.\s*productListMain\s*=\s*\{",
+        r"window\s*\.\s*BEYMEN\s*\.\s*productListMain\s*=\s*\{",
+        r"productListMain\s*[:=]\s*\{",
+    ]
+    for pattern in obj_patterns:
+        for match in re.finditer(pattern, text, flags=re.DOTALL):
+            obj_start = match.end() - 1
+            obj_str = _extract_balanced(text, obj_start, "{", "}")
+            obj = _safe_json_loads(obj_str)
+            if isinstance(obj, dict):
+                # Look for products array inside the object
+                products = obj.get("products")
+                if _looks_like_product_list(products):
+                    logger.info(f"Extracted {len(products)} products from productListMain object")
+                    return products
+
+    # Fallback: balanced bracket extraction for direct array
     start_patterns = [
         r"BEYMEN\s*\.\s*productListMain\s*=\s*\[",
         r"window\s*\.\s*BEYMEN\s*\.\s*productListMain\s*=\s*\[",
@@ -538,18 +702,20 @@ def extract_json_data(html: str) -> List[Dict]:
         payload = next_data.get_text()
         data = _safe_json_loads(payload)
         found = _find_key_recursive(data, "productListMain")
-        if _looks_like_product_list(found):
+        unwrapped = _unwrap_product_list(found)
+        if unwrapped:
             logger.info("Found product list via __NEXT_DATA__.")
-            return found
+            return unwrapped
 
     # Any application/json script tags
     for script in soup.find_all("script", attrs={"type": "application/json"}):
         payload = script.get_text()
         data = _safe_json_loads(payload)
         found = _find_key_recursive(data, "productListMain")
-        if _looks_like_product_list(found):
+        unwrapped = _unwrap_product_list(found)
+        if unwrapped:
             logger.info("Found product list via application/json script.")
-            return found
+            return unwrapped
 
     # Scan inline scripts for productListMain
     for script in soup.find_all("script"):
@@ -564,9 +730,10 @@ def extract_json_data(html: str) -> List[Dict]:
         for var_name in ("__INITIAL_STATE__", "__PRELOADED_STATE__", "BEYMEN"):
             state = _extract_object_assignment(payload, var_name)
             found = _find_key_recursive(state, "productListMain")
-            if _looks_like_product_list(found):
+            unwrapped = _unwrap_product_list(found)
+            if unwrapped:
                 logger.info(f"Found product list via {var_name} state.")
-                return found
+                return unwrapped
 
     # Method 2: LD-JSON ItemList extraction
     ld_products = _extract_ld_json_products(soup)
@@ -595,7 +762,7 @@ def process_product(item: Dict) -> Optional[Dict]:
 
         # Branch 1: Beymen productListMain schema
         if "productId" in item or "displayName" in item:
-            url_suffix = item.get("url", "")
+            url_suffix = item.get("url") or item.get("productUrl") or ""
             full_url = _ensure_abs_url(url_suffix)
 
             images = item.get("images", [])
@@ -608,18 +775,22 @@ def process_product(item: Dict) -> Optional[Dict]:
                     image_url = first
             image_url = _ensure_abs_url(image_url)
 
-            # Sizes
+            # Sizes — keep all sizes with stock info
             size_list = []
             raw_sizes = item.get("sizes", [])
             if isinstance(raw_sizes, list):
                 for s in raw_sizes:
-                    if isinstance(s, dict) and s.get("inStock"):
-                        size_list.append(s.get("sizeName"))
+                    if isinstance(s, dict) and s.get("sizeName"):
+                        size_list.append({
+                            "size": s.get("sizeName"),
+                            "inStock": bool(s.get("inStock", False)),
+                        })
 
             price = _parse_price(item.get("actualPrice"))
             original_price = _parse_price(item.get("originalPrice"))
 
-            sku = item.get("productId") or _derive_sku(full_url, item.get("displayName"))
+            raw_id = item.get("productId")
+            sku = f"beymen-{raw_id}" if raw_id is not None else _derive_sku(full_url, item.get("displayName"))
 
             product_data = {
                 "sku": sku,
@@ -633,7 +804,7 @@ def process_product(item: Dict) -> Optional[Dict]:
                 "category": item.get("categoryName") or item.get("category"),
                 "gender": item.get("gender"),
                 "currency": "TRY",
-                "stock_code": item.get("productId"),
+                "stock_code": str(item.get("productId")) if item.get("productId") else None,
             }
             return product_data
 
@@ -644,7 +815,11 @@ def process_product(item: Dict) -> Optional[Dict]:
         brand = item.get("brand") or item.get("brandName")
         price = _parse_price(item.get("price") or item.get("actualPrice"))
         original_price = _parse_price(item.get("original_price") or item.get("originalPrice"))
-        sku = item.get("sku") or item.get("productId") or _derive_sku(url, name)
+        raw_sku = item.get("sku") or item.get("productId")
+        if raw_sku is not None:
+            sku = str(raw_sku) if str(raw_sku).startswith("beymen-") else f"beymen-{raw_sku}"
+        else:
+            sku = _derive_sku(url, name)
         sizes = item.get("sizes") if isinstance(item.get("sizes"), list) else []
         category = item.get("category") or item.get("categoryName")
         gender = item.get("gender")
@@ -725,46 +900,41 @@ async def save_product(session, data: Dict) -> bool:
     return True
 
 
-async def run_pipeline():
-    """
-    Main entry point.
-    """
-    logger.info("Starting Beymen Scraper Pipeline...")
-    
-    html = fetch_html(TARGET_URL, render_js=False)
+async def scrape_single_url(url: str, session_factory):
+    """Scrape a single Beymen category URL and save products to DB."""
+    logger.info(f"--- Scraping: {url} ---")
+
+    html = await fetch_html(url, render_js=False)
     if not html:
-        logger.error("Failed to retrieve HTML.")
-        return
+        logger.error(f"Failed to retrieve HTML for {url}")
+        return 0, 0, 0
 
     try:
         products_data = extract_json_data(html)
     except Exception as e:
-        logger.error(f"Extraction error (SSR): {e}")
+        logger.error(f"Extraction error (SSR) for {url}: {e}")
         save_debug_html(html, "ssr_parse_error")
         products_data = []
-    logger.info(f"Extracted {len(products_data)} products from extraction.")
+    logger.info(f"Extracted {len(products_data)} products from SSR for {url}")
 
     if not products_data:
         save_debug_html(html, "ssr_no_products")
-        logger.warning("No products found in SSR HTML. Retrying with JS rendering...")
-        html = fetch_html(TARGET_URL, render_js=True)
+        logger.warning(f"No products in SSR for {url}. Retrying with JS rendering...")
+        html = await fetch_html(url, render_js=True)
         if html:
             try:
                 products_data = extract_json_data(html)
             except Exception as e:
-                logger.error(f"Extraction error (JS): {e}")
+                logger.error(f"Extraction error (JS) for {url}: {e}")
                 save_debug_html(html, "js_parse_error")
                 products_data = []
-            logger.info(f"Extracted {len(products_data)} products from JS-rendered HTML.")
+            logger.info(f"Extracted {len(products_data)} products from JS-rendered HTML for {url}")
 
     if not products_data:
         if html:
             save_debug_html(html, "js_no_products")
-        return
+        return 0, 0, 0
 
-    # Database Session — use a fresh session per product to avoid
-    # asyncpg prepared-statement pollution after rollback.
-    session_factory = get_session_factory()
     success_count = 0
     failed_count = 0
     skipped_count = 0
@@ -793,7 +963,39 @@ async def run_pipeline():
                 logger.error(f"Database error for {sku}: {e}")
 
     logger.info(
-        f"DB summary: success={success_count}, failed={failed_count}, skipped={skipped_count}"
+        f"DB summary for {url}: success={success_count}, failed={failed_count}, skipped={skipped_count}"
+    )
+    return success_count, failed_count, skipped_count
+
+
+async def run_pipeline(urls=None):
+    """
+    Main entry point. Scrapes one or more Beymen category URLs.
+
+    Args:
+        urls: List of URLs to scrape. Defaults to TARGET_URLS.
+    """
+    if urls is None:
+        urls = TARGET_URLS
+
+    logger.info(f"Starting Beymen Scraper Pipeline for {len(urls)} URL(s)...")
+    session_factory = get_session_factory()
+
+    total_success = 0
+    total_failed = 0
+    total_skipped = 0
+
+    for i, url in enumerate(urls):
+        if i > 0:
+            logger.info("Waiting 5s between URLs...")
+            await asyncio.sleep(5)
+        s, f, sk = await scrape_single_url(url, session_factory)
+        total_success += s
+        total_failed += f
+        total_skipped += sk
+
+    logger.info(
+        f"=== TOTAL DB summary: success={total_success}, failed={total_failed}, skipped={total_skipped} ==="
     )
 
 if __name__ == "__main__":

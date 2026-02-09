@@ -259,14 +259,28 @@ async def get_product_by_id_from_db(product_id: UUID) -> dict:
         return None
 
     category = p.category or _guess_category(p.name)
-    measurements = p.measurements or _get_default_measurements(category)
+    all_measurements = p.measurements or _get_default_measurements(category)
     if p.fit_type:
         fit_type = p.fit_type
-    elif category in ("palto", "mont", "kaban", "parka", "pardösü"):
+    elif category and category.lower() in ("palto", "mont", "kaban", "parka", "pardösü"):
         fit_type = "loose_fit"
     else:
         fit_type = "regular_fit"
     fabric = p.fabric_composition or {"cotton": 100}
+
+    # Filter measurements to only include sizes this product actually has
+    measurements = all_measurements
+    if all_measurements and p.sizes:
+        product_sizes = set()
+        for s in p.sizes:
+            if isinstance(s, dict):
+                product_sizes.add(str(s.get("size", "")))
+            elif isinstance(s, str):
+                product_sizes.add(s)
+        if product_sizes:
+            filtered = {k: v for k, v in all_measurements.items() if k in product_sizes}
+            if filtered:
+                measurements = filtered
 
     return {
         "id": str(p.id),

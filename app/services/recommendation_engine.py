@@ -192,16 +192,18 @@ class RecommendationEngine:
             "chest": 0.4,
             "waist": 0.3,
             "hip": 0.2,
-            "shoulder": 0.1
+            "shoulder": 0.1,
+            "foot_length": 1.0,  # Sole measurement for shoes — full weight
         }
-        
+
         # Map garment measurement keys to body measurement keys
         measurement_mapping = {
             "chest_width": "chest",
             "chest": "chest",
             "waist": "waist",
             "hip": "hip",
-            "shoulder_width": "shoulder"
+            "shoulder_width": "shoulder",
+            "foot_length": "foot_length",
         }
         
         measured_weight = 0
@@ -388,7 +390,14 @@ class RecommendationEngine:
         
         # Step 3: Find best size
         # Tiebreaker: when scores are equal, prefer smaller size (less excess fabric)
-        size_order = {"XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "XXXL": 7}
+        size_order = {
+            "XXS": 0, "XS": 1, "S": 2, "M": 3, "L": 4, "XL": 5, "XXL": 6, "XXXL": 7,
+            # Numeric sizes — suits/jackets (EU sizing)
+            "44": 10, "46": 11, "48": 12, "50": 13, "52": 14, "54": 15, "56": 16, "58": 17, "60": 18,
+            # Numeric sizes — shoes (EU sizing)
+            "39": 20, "39.5": 21, "40": 22, "40.5": 23, "41": 24, "41.5": 25,
+            "42": 26, "42.5": 27, "43": 28, "43.5": 29, "45": 32,
+        }
         sorted_sizes = sorted(
             size_scores.items(),
             key=lambda x: (x[1][0], -size_order.get(x[0], 5)),

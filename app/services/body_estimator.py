@@ -129,7 +129,11 @@ class BodyEstimator:
                     adjusted_value *= min(age_factor, 1.05)  # Cap at 5%
             
             measurements[measurement] = round(adjusted_value, 1)
-        
+
+        # Foot length estimation (anthropometric ratio)
+        # Average: foot_length ≈ height × 0.153
+        measurements["foot_length"] = round(height_cm * 0.153, 1)
+
         return measurements
     
     def get_body_analysis(

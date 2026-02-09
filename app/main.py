@@ -7,6 +7,7 @@ e-commerce clothing brands reduce return rates.
 from fastapi import FastAPI, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 from contextlib import asynccontextmanager
@@ -57,14 +58,36 @@ def _product_to_dict(p: Product) -> dict:
     category = p.category or _guess_category(p.name)
     measurements = p.measurements or _get_default_measurements(category)
     # Outerwear defaults to loose_fit (worn over other layers)
+    cat_lower = category.lower() if category else ""
     if p.fit_type:
         fit_type = p.fit_type
-    elif category in ("palto", "mont", "kaban", "parka", "pardösü"):
+    elif cat_lower in ("palto", "mont", "kaban", "parka", "pardösü"):
         fit_type = "loose_fit"
     else:
         fit_type = "regular_fit"
     fabric = p.fabric_composition or {"cotton": 100}
-    sizes = p.sizes if p.sizes else (list(measurements.keys()) if measurements else [])
+
+    # Sizes: DB may contain old format (list of strings) or new format (list of dicts)
+    raw_sizes = p.sizes if p.sizes else []
+    if raw_sizes and isinstance(raw_sizes[0], dict):
+        # New format: [{"size": "50", "inStock": true}, ...]
+        sizes_with_stock = raw_sizes
+        available_sizes = [s["size"] for s in raw_sizes if s.get("inStock", True)]
+    elif raw_sizes and isinstance(raw_sizes[0], str):
+        # Old format: ["S", "M", "L"] — assume all in stock
+        sizes_with_stock = [{"size": s, "inStock": True} for s in raw_sizes]
+        available_sizes = raw_sizes
+    else:
+        # Fallback to measurement keys
+        fallback = list(measurements.keys()) if measurements else []
+        sizes_with_stock = [{"size": s, "inStock": True} for s in fallback]
+        available_sizes = fallback
+
+    # Fix CDN placeholder URLs: {width}/{height} → 500/500
+    image_url = p.image_url
+    if image_url and "{width}" in image_url:
+        image_url = image_url.replace("{width}", "500").replace("{height}", "500")
+
     return {
         "id": str(p.id),
         "sku": p.sku,
@@ -73,9 +96,10 @@ def _product_to_dict(p: Product) -> dict:
         "price": price_str,
         "price_raw": p.price,
         "url": p.url,
-        "image_url": p.image_url,
+        "image_url": image_url,
         "category": category,
-        "sizes": sizes,
+        "sizes": sizes_with_stock,
+        "available_sizes": available_sizes,
         "measurements": measurements,
         "fit_type": fit_type,
         "fabric_composition": fabric,
@@ -99,6 +123,16 @@ _CATEGORY_KEYWORDS = {
     "tişört": "tişört",
     "kazak": "kazak",
     "triko": "kazak",
+    "ayakkabı": "ayakkabı",
+    "oxford": "ayakkabı",
+    "loafer": "ayakkabı",
+    "derby": "ayakkabı",
+    "brogue": "ayakkabı",
+    "monk": "ayakkabı",
+    "takım elbise": "takım elbise",
+    "takım": "takım elbise",
+    "suit": "takım elbise",
+    "smokin": "takım elbise",
 }
 
 
@@ -126,6 +160,15 @@ _DEFAULT_MEASUREMENTS = {
         "L":   {"chest_width": 112, "length": 82, "shoulder_width": 47, "waist": 106},
         "XL":  {"chest_width": 118, "length": 84, "shoulder_width": 49, "waist": 112},
         "XXL": {"chest_width": 124, "length": 86, "shoulder_width": 51, "waist": 118},
+        # Numeric EU sizes (same body measurements)
+        "46": {"chest_width": 100, "length": 78, "shoulder_width": 43, "waist": 94},
+        "48": {"chest_width": 104, "length": 79, "shoulder_width": 44, "waist": 98},
+        "50": {"chest_width": 108, "length": 80, "shoulder_width": 45, "waist": 102},
+        "52": {"chest_width": 112, "length": 82, "shoulder_width": 47, "waist": 106},
+        "54": {"chest_width": 116, "length": 83, "shoulder_width": 48, "waist": 110},
+        "56": {"chest_width": 120, "length": 84, "shoulder_width": 49, "waist": 114},
+        "58": {"chest_width": 124, "length": 86, "shoulder_width": 51, "waist": 118},
+        "60": {"chest_width": 128, "length": 88, "shoulder_width": 52, "waist": 122},
     },
     # Üst giyim has ~5-8cm ease (structured, single layer)
     "üst_giyim": {  # ceket, blazer, yelek
@@ -134,6 +177,15 @@ _DEFAULT_MEASUREMENTS = {
         "L":   {"chest_width": 108, "length": 74, "shoulder_width": 46, "waist": 102},
         "XL":  {"chest_width": 114, "length": 76, "shoulder_width": 48, "waist": 108},
         "XXL": {"chest_width": 120, "length": 78, "shoulder_width": 50, "waist": 114},
+        # Numeric EU sizes
+        "46": {"chest_width": 96, "length": 70, "shoulder_width": 42, "waist": 90},
+        "48": {"chest_width": 100, "length": 72, "shoulder_width": 43, "waist": 94},
+        "50": {"chest_width": 104, "length": 73, "shoulder_width": 44, "waist": 98},
+        "52": {"chest_width": 108, "length": 74, "shoulder_width": 46, "waist": 102},
+        "54": {"chest_width": 112, "length": 76, "shoulder_width": 47, "waist": 106},
+        "56": {"chest_width": 116, "length": 77, "shoulder_width": 48, "waist": 110},
+        "58": {"chest_width": 120, "length": 78, "shoulder_width": 50, "waist": 114},
+        "60": {"chest_width": 124, "length": 80, "shoulder_width": 51, "waist": 118},
     },
     # Alt giyim: waist + hip are key measurements (no chest)
     "alt_giyim": {  # pantolon, chino, jean
@@ -142,6 +194,14 @@ _DEFAULT_MEASUREMENTS = {
         "L":   {"waist": 88, "hip": 106, "length": 106},
         "XL":  {"waist": 94, "hip": 112, "length": 108},
         "XXL": {"waist": 100, "hip": 118, "length": 110},
+        # Numeric EU sizes
+        "44": {"waist": 74, "hip": 92, "length": 101},
+        "46": {"waist": 78, "hip": 96, "length": 102},
+        "48": {"waist": 82, "hip": 100, "length": 103},
+        "50": {"waist": 86, "hip": 104, "length": 104},
+        "52": {"waist": 90, "hip": 108, "length": 106},
+        "54": {"waist": 94, "hip": 112, "length": 107},
+        "56": {"waist": 98, "hip": 116, "length": 108},
     },
     # Üst iç giyim: ~3-5cm ease (body-hugging)
     "üst_iç_giyim": {  # gömlek, tişört, kazak, triko
@@ -151,15 +211,36 @@ _DEFAULT_MEASUREMENTS = {
         "XL":  {"chest_width": 112, "length": 78, "shoulder_width": 48, "waist": 106},
         "XXL": {"chest_width": 118, "length": 80, "shoulder_width": 50, "waist": 112},
     },
+    # Takım elbise (suit): ~4-6cm ease, similar to üst_giyim but slightly more fitted
+    "takım_elbise": {
+        "46": {"chest_width": 96, "length": 70, "shoulder_width": 42, "waist": 84},
+        "48": {"chest_width": 100, "length": 72, "shoulder_width": 43, "waist": 88},
+        "50": {"chest_width": 104, "length": 74, "shoulder_width": 45, "waist": 92},
+        "52": {"chest_width": 108, "length": 75, "shoulder_width": 46, "waist": 96},
+        "54": {"chest_width": 112, "length": 76, "shoulder_width": 48, "waist": 100},
+        "56": {"chest_width": 116, "length": 78, "shoulder_width": 50, "waist": 104},
+    },
+    # Ayakkabı: foot length based sizing
+    "ayakkabı": {
+        "39": {"foot_length": 25.0},
+        "40": {"foot_length": 25.7},
+        "41": {"foot_length": 26.3},
+        "42": {"foot_length": 27.0},
+        "43": {"foot_length": 27.7},
+        "44": {"foot_length": 28.3},
+        "45": {"foot_length": 29.0},
+    },
 }
 
 _CATEGORY_TO_MEASUREMENT_GROUP = {
     "palto": "dış_giyim", "mont": "dış_giyim", "kaban": "dış_giyim",
     "parka": "dış_giyim", "pardösü": "dış_giyim",
-    "ceket": "üst_giyim", "yelek": "üst_giyim",
-    "pantolon": "alt_giyim",
+    "ceket": "üst_giyim", "yelek": "üst_giyim", "blazer": "üst_giyim",
+    "pantolon": "alt_giyim", "spor pantolon": "alt_giyim",
     "gömlek": "üst_iç_giyim", "tişört": "üst_iç_giyim",
     "kazak": "üst_iç_giyim",
+    "takım elbise": "takım_elbise", "takım": "takım_elbise", "takim": "takım_elbise",
+    "ayakkabı": "ayakkabı", "ayakkabi": "ayakkabı", "loafer": "ayakkabı",
 }
 
 
@@ -167,7 +248,8 @@ def _get_default_measurements(category: Optional[str]) -> Optional[dict]:
     """Return default measurements for a category, or None."""
     if not category:
         return None
-    group = _CATEGORY_TO_MEASUREMENT_GROUP.get(category)
+    cat_lower = category.lower()
+    group = _CATEGORY_TO_MEASUREMENT_GROUP.get(cat_lower)
     if not group:
         return None
     return _DEFAULT_MEASUREMENTS.get(group)
@@ -175,30 +257,45 @@ def _get_default_measurements(category: Optional[str]) -> Optional[dict]:
 
 # Combo mapping: category -> list of complementary categories
 _COMBO_MAP = {
-    "palto": ["pantolon", "gömlek", "kazak"],
+    "palto": ["pantolon", "gömlek", "kazak", "ayakkabı"],
     "mont": ["pantolon", "gömlek", "kazak"],
     "kaban": ["pantolon", "gömlek", "kazak"],
-    "ceket": ["pantolon", "gömlek"],
+    "ceket": ["pantolon", "gömlek", "ayakkabı"],
+    "blazer": ["pantolon", "gömlek", "ayakkabı"],
     "yelek": ["pantolon", "gömlek"],
     "parka": ["pantolon", "kazak"],
     "pardösü": ["pantolon", "gömlek"],
-    "pantolon": ["ceket", "palto", "mont", "gömlek"],
-    "gömlek": ["ceket", "pantolon", "palto"],
+    "pantolon": ["ceket", "blazer", "palto", "mont", "gömlek", "ayakkabı"],
+    "spor pantolon": ["ceket", "mont", "ayakkabı"],
+    "gömlek": ["ceket", "blazer", "pantolon", "palto"],
     "kazak": ["pantolon", "palto", "mont"],
     "tişört": ["pantolon", "ceket"],
+    "ayakkabı": ["pantolon", "ceket", "blazer", "takım"],
+    "ayakkabi": ["pantolon", "ceket", "blazer", "takım"],
+    "loafer": ["pantolon", "blazer", "takım"],
+    "takım elbise": ["gömlek", "ayakkabı", "palto"],
+    "takım": ["gömlek", "ayakkabı", "palto"],
+    "takim": ["gömlek", "ayakkabı", "palto"],
 }
 
 
 async def search_products(keywords: List[str], limit: int = 3) -> List[dict]:
-    """Search products table. All keywords must match (AND) for best relevance."""
+    """Search products table. Keywords match against name OR category column."""
     if not keywords:
         return []
     from sqlalchemy import and_
     session_factory = get_session_factory()
     async with session_factory() as session:
-        conditions = [func.lower(Product.name).contains(kw.lower()) for kw in keywords]
+        # Each keyword can match in name OR category
+        conditions = [
+            or_(
+                func.lower(Product.name).contains(kw.lower()),
+                func.lower(Product.category).contains(kw.lower()),
+            )
+            for kw in keywords
+        ]
 
-        # AND: every keyword must appear in the name
+        # AND: every keyword must appear in name or category
         stmt = (
             select(Product)
             .where(Product.is_active == True)
@@ -224,24 +321,40 @@ async def search_products(keywords: List[str], limit: int = 3) -> List[dict]:
         return [_product_to_dict(r) for r in rows]
 
 
-async def get_combo_products(main_category: str, exclude_id: str, limit: int = 1) -> List[dict]:
-    """Find complementary products for outfit combo."""
-    target_cats = _COMBO_MAP.get(main_category, [])
+async def get_combo_products(
+    main_category: str,
+    exclude_id: str,
+    limit: int = 2,
+    exclude_ids: set = None,
+) -> List[dict]:
+    """Find complementary products for outfit combo.
+
+    Args:
+        main_category: Category of the main product (e.g. "palto").
+        exclude_id: Single product ID to exclude (backward compat).
+        limit: Max combo products to return.
+        exclude_ids: Set of product IDs to exclude (e.g. all main search results).
+    """
+    cat_lower = main_category.lower() if main_category else ""
+    target_cats = _COMBO_MAP.get(cat_lower, [])
     if not target_cats:
         return []
 
+    ids_to_exclude = list(exclude_ids) if exclude_ids else [exclude_id]
+
     session_factory = get_session_factory()
     async with session_factory() as session:
-        # Build name-based category filter since 'category' column is often NULL
+        # Build category filter — match by name OR by category column
         cat_conditions = []
         for cat in target_cats:
             cat_conditions.append(func.lower(Product.name).contains(cat))
+            cat_conditions.append(func.lower(Product.category).contains(cat))
 
         stmt = (
             select(Product)
             .where(Product.is_active == True)
             .where(or_(*cat_conditions))
-            .where(Product.id != exclude_id)
+            .where(Product.id.notin_(ids_to_exclude))
             .order_by(func.random())
             .limit(limit)
         )
@@ -515,11 +628,22 @@ async def add_timing_header(request: Request, call_next):
     start_time = time.time()
     response = await call_next(request)
     response.headers["X-Process-Time"] = f"{time.time() - start_time:.4f}"
+    # Prevent caching for widget files during development
+    if request.url.path.startswith("/widget/"):
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
     return response
 
 
 app.include_router(products.router)
 app.include_router(recommendations.router)
+
+# Serve widget files at /widget/ so test.html works via http://localhost:8000/widget/test.html
+import pathlib
+_widget_dir = pathlib.Path(__file__).resolve().parent.parent / "widget"
+if _widget_dir.is_dir():
+    app.mount("/widget", StaticFiles(directory=str(_widget_dir), html=True), name="widget")
 
 
 # =============================================================================
@@ -561,38 +685,120 @@ async def chat_with_ai(request: ChatRequest):
     search_kws = list(keywords)
     if not search_kws and category:
         search_kws.append(category)
+
+    # If no keywords at all, show a welcome message instead of random products
     if not search_kws:
-        # Generic — show popular items
-        search_kws = ["palto", "ceket", "mont"]
+        return ChatResponse(
+            message="Beymen'e hoş geldiniz efendim! Size nasıl yardımcı olabilirim? Palto, mont, ceket, pantolon, takım elbise, ayakkabı gibi kategorilerde arama yapabilirsiniz.",
+            conversation_id=request.conversation_id,
+        )
 
     found = await search_products(search_kws, limit=3)
 
     if not found:
-        return ChatResponse(
-            message=f"Maalesef '{' '.join(keywords)}' aramanızla eşleşen bir ürün bulamadım efendim. Palto, mont, ceket, pantolon gibi kategorilerde arama yapabilirsiniz.",
-            conversation_id=request.conversation_id,
-        )
+        # Smart suggestion: offer related categories instead of empty response
+        cat_lower = category.lower() if category else ""
+        suggestion_cats = _COMBO_MAP.get(cat_lower, ["palto", "ceket", "pantolon"])
+        suggestions = []
+        for scat in suggestion_cats[:3]:
+            suggestions = await search_products([scat], limit=3)
+            if suggestions:
+                break
 
-    # Determine main category from first result for combo lookup
-    main_cat = found[0].get("category") or _guess_category(found[0]["name"])
-    exclude_ids = [p["id"] for p in found]
+        if suggestions:
+            search_term = " ".join(keywords) if keywords else (category or "")
+            styled_msg = await generate_styled_response(
+                request.message, suggestions, []
+            )
+            return ChatResponse(
+                message=f"Maalesef '{search_term}' kategorisinde ürün bulamadım efendim, ancak bunları beğenebileceğinizi düşünüyorum:\n\n{styled_msg}",
+                products=suggestions,
+                combos=[],
+                conversation_id=request.conversation_id,
+            )
+        else:
+            return ChatResponse(
+                message=f"Maalesef '{' '.join(keywords)}' aramanızla eşleşen bir ürün bulamadım efendim. Palto, mont, ceket, pantolon gibi kategorilerde arama yapabilirsiniz.",
+                conversation_id=request.conversation_id,
+            )
 
-    # Find combos (complementary products)
-    combos = []
-    if main_cat:
-        combos = await get_combo_products(main_cat, exclude_ids[0], limit=2)
+    # No combo generation at search time — combos are fetched on-demand
+    # via /api/v1/products/{product_id}/combos after user selects a product
 
     # Generate styled message
-    styled_msg = await generate_styled_response(request.message, found, combos)
+    styled_msg = await generate_styled_response(request.message, found, [])
 
     return ChatResponse(
         message=styled_msg,
         products=found,
-        combos=combos,
+        combos=[],
         main_product=found[0] if found else None,
-        combo_product=combos[0] if combos else None,
         conversation_id=request.conversation_id,
     )
+
+
+# =============================================================================
+# ON-DEMAND COMBO ENDPOINT — lazy fetch for post-selection combo suggestions
+# =============================================================================
+
+@app.get("/api/v1/products/{product_id}/combos", tags=["Products"])
+async def get_product_combos_endpoint(product_id: str, limit: int = 2):
+    """
+    Fetch combo/complementary products for a specific product.
+
+    Used by the widget when a user selects a product or clicks
+    'Görünümü Tamamla' on a card that had no preloaded combos.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        stmt = select(Product).where(Product.id == product_id, Product.is_active == True)
+        result = await session.execute(stmt)
+        product = result.scalars().first()
+
+    if not product:
+        return {"combos": [], "product_id": product_id, "category": None}
+
+    p_dict = _product_to_dict(product)
+    category = p_dict.get("category") or _guess_category(p_dict["name"])
+    if not category:
+        return {"combos": [], "product_id": product_id, "category": None}
+
+    combos = await get_combo_products(category, product_id, limit=limit)
+    return {"combos": combos, "product_id": product_id, "category": category}
+
+
+# =============================================================================
+# CART ENDPOINT — placeholder for future cart integration
+# =============================================================================
+
+class CartItem(BaseModel):
+    product_id: str
+    size: Optional[str] = None
+    quantity: int = 1
+
+
+class CartRequest(BaseModel):
+    items: List[CartItem]
+
+
+@app.post("/api/v1/cart", tags=["Cart"])
+async def add_to_cart(request: CartRequest):
+    """
+    Placeholder cart endpoint.
+
+    Accepts selected products with optional size and quantity.
+    Currently logs the request and returns success.
+    Future: integrate with e-commerce cart system.
+    """
+    print(f"[Cart] {len(request.items)} items added:")
+    for item in request.items:
+        print(f"  - product={item.product_id}, size={item.size}, qty={item.quantity}")
+
+    return {
+        "status": "ok",
+        "added_count": len(request.items),
+        "items": [item.model_dump() for item in request.items],
+    }
 
 
 # =============================================================================
@@ -667,19 +873,35 @@ Sadece JSON."""
         kws = parsed.get("keywords", [])
         found = await search_products(kws, limit=3) if kws else []
 
-        combos = []
-        if found:
-            cat = found[0].get("category") or _guess_category(found[0]["name"])
-            if cat:
-                combos = await get_combo_products(cat, found[0]["id"], limit=2)
+        # Per-product combo generation (same pattern as chat endpoint)
+        all_found_ids = {p["id"] for p in found}
+        all_combos_flat = []
 
-        msg = await generate_styled_response("gorsel arama", found, combos) if found else "Bu gorsele uygun urun bulamadim."
+        for product in found:
+            cat = product.get("category") or _guess_category(product["name"])
+            if cat:
+                product_combos = await get_combo_products(
+                    cat, exclude_id=product["id"], limit=2, exclude_ids=all_found_ids,
+                )
+                product["combos"] = product_combos
+                all_combos_flat.extend(product_combos)
+            else:
+                product["combos"] = []
+
+        seen_ids = set()
+        unique_combos = []
+        for c in all_combos_flat:
+            if c["id"] not in seen_ids:
+                seen_ids.add(c["id"])
+                unique_combos.append(c)
+
+        msg = await generate_styled_response("gorsel arama", found, unique_combos) if found else "Bu gorsele uygun urun bulamadim."
         return {
             "message": msg,
             "products": found,
-            "combos": combos,
+            "combos": unique_combos,
             "main_product": found[0] if found else None,
-            "combo_product": combos[0] if combos else None,
+            "combo_product": unique_combos[0] if unique_combos else None,
         }
 
     except Exception as e:

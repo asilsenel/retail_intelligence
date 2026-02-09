@@ -1,10 +1,10 @@
 /**
  * Beymen AI Personal Shopper - Floating Widget
- * 
+ *
  * Self-contained overlay widget (Intercom-style).
  * Paste this script on any page to enable the AI assistant.
- * 
- * v5.0 - Fixed State Machine + Image Upload & Analysis
+ *
+ * v8.0 - Stepped flow: search → select → size → combo (skip option) → cart
  */
 
 (function (window, document) {
@@ -24,14 +24,15 @@
     // =========================================================================
 
     let isOpen = false;
+    let isExpanded = false;
     let messages = [];
-    let currentActiveProductId = null;  // CRITICAL: Track which product awaits size calc
+    let currentActiveProductId = null;
     let userHeight = null;
     let userWeight = null;
     let productsCache = {};
-    let cardCounter = 0;  // Unique ID for each card
-    let selectedProducts = {};  // id -> { product, cardId }
-    let cardProductMap = {};    // cardId -> productId (to link size results)
+    let cardCounter = 0;
+    let selectedProducts = {};
+    let cardProductMap = {};
 
     // =========================================================================
     // STYLES
@@ -39,7 +40,8 @@
 
     const STYLES = `
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600&family=Inter:wght@300;400;500;600&display=swap');
-        
+
+        /* ---- FAB ---- */
         #beymen-widget-fab {
             position: fixed;
             bottom: 24px;
@@ -57,23 +59,24 @@
             z-index: 999998;
             transition: transform 0.2s, box-shadow 0.2s;
         }
-        
+
         #beymen-widget-fab:hover {
             transform: scale(1.05);
             box-shadow: 0 6px 32px rgba(0,0,0,0.4);
         }
-        
+
         #beymen-widget-fab svg {
             width: 26px;
             height: 26px;
             fill: #FFFFFF;
             transition: transform 0.3s;
         }
-        
+
         #beymen-widget-fab.open svg {
             transform: rotate(45deg);
         }
-        
+
+        /* ---- Window ---- */
         #beymen-widget-window {
             position: fixed;
             bottom: 100px;
@@ -89,26 +92,34 @@
             opacity: 0;
             visibility: hidden;
             transform: translateY(16px) scale(0.96);
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
             overflow: hidden;
         }
-        
+
         #beymen-widget-window.open {
             opacity: 1;
             visibility: visible;
             transform: translateY(0) scale(1);
         }
-        
+
+        #beymen-widget-window.expanded {
+            width: 680px;
+            height: 85vh;
+            bottom: 40px;
+        }
+
         @media (max-width: 420px) {
             #beymen-widget-window {
-                width: calc(100vw - 24px);
-                right: 12px;
-                left: 12px;
-                height: 75vh;
+                width: calc(100vw - 16px);
+                right: 8px;
+                left: 8px;
+                bottom: 80px;
+                height: 80vh;
+                border-radius: 12px;
             }
         }
-        
-        /* Header */
+
+        /* ---- Header ---- */
         .bw-header {
             background: #000000;
             padding: 14px 16px;
@@ -116,7 +127,7 @@
             align-items: center;
             gap: 12px;
         }
-        
+
         .bw-avatar {
             width: 36px;
             height: 36px;
@@ -127,35 +138,30 @@
             justify-content: center;
             flex-shrink: 0;
         }
-        
+
         .bw-avatar svg {
             width: 20px;
             height: 20px;
             fill: #000000;
         }
-        
-        .bw-header-text {
-            flex: 1;
-        }
-        
+
+        .bw-header-text { flex: 1; }
+
         .bw-header-title {
             font-family: 'Playfair Display', serif;
             font-size: 15px;
             font-weight: 500;
             color: #FFFFFF;
         }
-        
+
         .bw-header-status {
             font-family: 'Inter', sans-serif;
             font-size: 11px;
             color: rgba(255,255,255,0.6);
         }
-        
-        .bw-header-actions {
-            display: flex;
-            gap: 8px;
-        }
-        
+
+        .bw-header-actions { display: flex; gap: 8px; }
+
         .bw-header-btn {
             width: 32px;
             height: 32px;
@@ -168,18 +174,11 @@
             justify-content: center;
             transition: background 0.2s;
         }
-        
-        .bw-header-btn:hover {
-            background: rgba(255,255,255,0.2);
-        }
-        
-        .bw-header-btn svg {
-            width: 16px;
-            height: 16px;
-            fill: #FFFFFF;
-        }
-        
-        /* Body */
+
+        .bw-header-btn:hover { background: rgba(255,255,255,0.2); }
+        .bw-header-btn svg { width: 16px; height: 16px; fill: #FFFFFF; }
+
+        /* ---- Body ---- */
         .bw-body {
             flex: 1;
             overflow-y: auto;
@@ -189,24 +188,24 @@
             flex-direction: column;
             gap: 12px;
         }
-        
+
         .bw-body::-webkit-scrollbar { width: 4px; }
         .bw-body::-webkit-scrollbar-thumb { background: #CCC; border-radius: 2px; }
-        
-        /* Messages */
+
+        /* ---- Messages ---- */
         .bw-msg {
             display: flex;
             gap: 10px;
             animation: bwMsgIn 0.3s ease;
         }
-        
+
         @keyframes bwMsgIn {
             from { opacity: 0; transform: translateY(8px); }
             to { opacity: 1; transform: translateY(0); }
         }
-        
+
         .bw-msg.user { flex-direction: row-reverse; }
-        
+
         .bw-msg-avatar {
             width: 28px;
             height: 28px;
@@ -217,12 +216,11 @@
             justify-content: center;
             flex-shrink: 0;
         }
-        
+
         .bw-msg.user .bw-msg-avatar { background: #DDD; }
-        
         .bw-msg-avatar svg { width: 14px; height: 14px; fill: #FFF; }
         .bw-msg.user .bw-msg-avatar svg { fill: #666; }
-        
+
         .bw-bubble {
             max-width: 270px;
             padding: 12px 14px;
@@ -235,116 +233,143 @@
             color: #1a1a1a;
             box-shadow: 0 1px 4px rgba(0,0,0,0.06);
         }
-        
+
         .bw-msg.user .bw-bubble {
             background: #000000;
             color: #FFFFFF;
             border-radius: 14px;
             border-top-right-radius: 4px;
         }
-        
-        /* Image Preview */
+
+        /* ---- Image Preview ---- */
         .bw-image-preview {
             max-width: 200px;
             border-radius: 10px;
             overflow: hidden;
             box-shadow: 0 2px 8px rgba(0,0,0,0.1);
         }
-        
+
         .bw-image-preview img {
             width: 100%;
             height: auto;
             display: block;
         }
-        
-        /* Product Card */
+
+        /* ---- Product Card ---- */
         .bw-card {
             background: #FFFFFF;
             border-radius: 12px;
             overflow: hidden;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+            box-shadow: 0 1px 8px rgba(0,0,0,0.06);
             max-width: 280px;
+            border: 1px solid rgba(0,0,0,0.04);
+            transition: box-shadow 0.3s ease, transform 0.3s ease;
         }
-        
+
+        .bw-card:hover {
+            box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+            transform: translateY(-2px);
+        }
+
+        .bw-card-img-wrap {
+            overflow: hidden;
+            position: relative;
+        }
+
         .bw-card-img {
             width: 100%;
-            height: 160px;
+            height: 180px;
             object-fit: cover;
+            display: block;
+            transition: transform 0.5s cubic-bezier(0.25, 0.1, 0.25, 1);
         }
-        
+
+        .bw-card:hover .bw-card-img {
+            transform: scale(1.03);
+        }
+
         .bw-card-body { padding: 14px; }
-        
+
         .bw-card-brand {
+            font-family: 'Inter', sans-serif;
             font-size: 9px;
             font-weight: 600;
-            letter-spacing: 1px;
+            letter-spacing: 1.5px;
             text-transform: uppercase;
-            color: #999;
-            margin-bottom: 4px;
+            color: #888;
+            margin-bottom: 6px;
         }
-        
+
         .bw-card-name {
             font-family: 'Playfair Display', serif;
-            font-size: 15px;
+            font-size: 14px;
             font-weight: 500;
             color: #000;
-            margin-bottom: 6px;
-            line-height: 1.3;
+            margin-bottom: 8px;
+            line-height: 1.4;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
         }
-        
+
         .bw-card-price {
+            font-family: 'Inter', sans-serif;
             font-size: 14px;
             font-weight: 600;
             color: #000;
             margin-bottom: 12px;
         }
-        
+
         .bw-card-actions {
             display: flex;
             flex-direction: column;
             gap: 8px;
         }
-        
-        /* Size Result Inline */
-        .bw-card-size-result {
-            background: linear-gradient(135deg, #000 0%, #1a1a1a 100%);
-            color: #FFF;
-            padding: 14px;
-            border-radius: 8px;
-            text-align: center;
-            margin-top: 10px;
-            animation: bwFadeIn 0.4s ease;
+
+        /* ---- Size Result Inline (compact text) ---- */
+        .bw-card-size-inline {
+            font-family: 'Inter', sans-serif;
+            font-size: 12px;
+            color: #4ade80;
+            font-weight: 500;
+            margin-bottom: 8px;
         }
-        
+
         @keyframes bwFadeIn {
             from { opacity: 0; transform: scale(0.95); }
             to { opacity: 1; transform: scale(1); }
         }
-        
-        .bw-card-size-label {
-            font-size: 9px;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            opacity: 0.7;
+
+        /* ---- Step Prompt (size / combo question) ---- */
+        .bw-step-prompt {
+            background: #FFFFFF;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+            max-width: 280px;
+            border: 1px solid rgba(0,0,0,0.06);
+            animation: bwSlideUp 0.3s ease;
         }
-        
-        .bw-card-size-value {
+
+        .bw-step-prompt-title {
             font-family: 'Playfair Display', serif;
-            font-size: 32px;
-            font-weight: 600;
-            margin: 4px 0;
+            font-size: 13px;
+            font-weight: 500;
+            color: #000;
+            margin-bottom: 10px;
         }
-        
-        .bw-card-size-conf {
-            font-size: 12px;
-            opacity: 0.9;
+
+        .bw-step-prompt-actions {
+            display: flex;
+            gap: 8px;
         }
-        
-        .bw-card-size-conf.high { color: #4ade80; }
-        .bw-card-size-conf.medium { color: #fbbf24; }
-        .bw-card-size-conf.low { color: #f87171; }
-        
-        /* Buttons */
+
+        .bw-step-prompt-actions .bw-btn {
+            flex: 1;
+        }
+
+        /* ---- Buttons ---- */
         .bw-btn {
             width: 100%;
             padding: 11px 14px;
@@ -360,95 +385,67 @@
             justify-content: center;
             gap: 6px;
         }
-        
+
         .bw-btn-primary { background: #000; color: #FFF; }
         .bw-btn-primary:hover { background: #222; }
         .bw-btn-primary:disabled { background: #999; cursor: not-allowed; }
-        
+        .bw-btn-primary.active { background: #1a1a1a; }
+
         .bw-btn-secondary { background: #F0F0F0; color: #333; }
         .bw-btn-secondary:hover { background: #E5E5E5; }
         .bw-btn-secondary.active { background: #E0E0E0; }
-        
-        /* Combo Accordion */
-        .bw-combo-container {
-            max-height: 0;
-            overflow: hidden;
-            transition: max-height 0.35s ease, padding 0.35s ease;
-            background: #F8F8F8;
-            margin: 0 -14px -14px;
-            padding: 0 14px;
-        }
-        
-        .bw-combo-container.open {
-            max-height: 500px;
-            padding: 14px;
-            border-top: 1px solid #E5E5E5;
-        }
-        
-        .bw-combo-label {
-            font-size: 10px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            color: #666;
-            margin-bottom: 10px;
-        }
-        
-        .bw-combo-card {
-            display: flex;
-            gap: 12px;
-            background: #FFF;
-            border-radius: 8px;
-            padding: 10px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.05);
-        }
-        
-        .bw-combo-img {
-            width: 70px;
-            height: 70px;
-            object-fit: cover;
-            border-radius: 6px;
+
+        .bw-btn-select { background: #F0F0F0; color: #333; }
+        .bw-btn-select:hover { background: #E5E5E5; }
+        .bw-btn-select.selected { background: #000; color: #FFF; }
+
+        .bw-btn svg.bw-icon {
+            width: 14px;
+            height: 14px;
             flex-shrink: 0;
         }
-        
-        .bw-combo-info {
+
+        /* ---- Skeleton Loader ---- */
+        .bw-combo-skeleton {
+            display: flex;
+            gap: 12px;
+            padding: 12px;
+            animation: bwPulse 1.5s infinite;
+        }
+
+        .bw-combo-skeleton-img {
+            width: 72px;
+            height: 72px;
+            background: #EBEBEB;
+            border-radius: 8px;
+            flex-shrink: 0;
+        }
+
+        .bw-combo-skeleton-lines {
             flex: 1;
             display: flex;
             flex-direction: column;
+            gap: 8px;
             justify-content: center;
         }
-        
-        .bw-combo-name {
-            font-size: 12px;
-            font-weight: 500;
-            color: #000;
-            margin-bottom: 4px;
-        }
-        
-        .bw-combo-price {
-            font-size: 11px;
-            font-weight: 600;
-            color: #000;
-            margin-bottom: 8px;
-        }
-        
-        .bw-combo-btn {
-            padding: 6px 10px;
-            font-size: 10px;
-            font-weight: 500;
-            background: #000;
-            color: #FFF;
-            border: none;
+
+        .bw-combo-skeleton-line {
+            height: 10px;
+            background: #EBEBEB;
             border-radius: 4px;
-            cursor: pointer;
-            align-self: flex-start;
         }
-        
-        .bw-combo-btn:hover { background: #222; }
-        
-        /* Typing */
+
+        .bw-combo-skeleton-line:first-child { width: 80%; }
+        .bw-combo-skeleton-line:nth-child(2) { width: 50%; }
+
+        @keyframes bwPulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* ---- Typing ---- */
         .bw-typing { display: flex; gap: 4px; padding: 4px 0; }
-        
+
         .bw-typing-dot {
             width: 6px;
             height: 6px;
@@ -456,22 +453,22 @@
             border-radius: 50%;
             animation: bwTyping 1.2s ease-in-out infinite;
         }
-        
+
         .bw-typing-dot:nth-child(2) { animation-delay: 0.15s; }
         .bw-typing-dot:nth-child(3) { animation-delay: 0.3s; }
-        
+
         @keyframes bwTyping {
             0%, 60%, 100% { transform: translateY(0); }
             30% { transform: translateY(-5px); }
         }
-        
-        /* Footer */
+
+        /* ---- Footer ---- */
         .bw-footer {
             padding: 12px 16px;
             background: #FFFFFF;
             border-top: 1px solid #E5E5E5;
         }
-        
+
         .bw-input-wrap {
             display: flex;
             align-items: center;
@@ -480,7 +477,7 @@
             border-radius: 24px;
             padding: 4px 4px 4px 6px;
         }
-        
+
         .bw-upload-btn {
             width: 32px;
             height: 32px;
@@ -493,10 +490,10 @@
             justify-content: center;
             transition: background 0.2s;
         }
-        
+
         .bw-upload-btn:hover { background: rgba(0,0,0,0.05); }
         .bw-upload-btn svg { width: 18px; height: 18px; fill: #666; }
-        
+
         .bw-input {
             flex: 1;
             border: none;
@@ -507,9 +504,9 @@
             outline: none;
             min-width: 0;
         }
-        
+
         .bw-input::placeholder { color: #999; }
-        
+
         .bw-send {
             width: 36px;
             height: 36px;
@@ -523,33 +520,37 @@
             transition: background 0.2s;
             flex-shrink: 0;
         }
-        
+
         .bw-send:hover { background: #222; }
         .bw-send svg { width: 16px; height: 16px; fill: #FFF; }
-        
+
         #bw-file-input { display: none; }
 
-        /* Selection */
-        .bw-btn-select { background: #F0F0F0; color: #333; }
-        .bw-btn-select:hover { background: #E5E5E5; }
-        .bw-btn-select.selected { background: #000; color: #FFF; }
-
+        /* ---- Selection Summary ---- */
         .bw-selection-summary {
             background: #FFFFFF;
             border-radius: 12px;
-            padding: 14px;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+            padding: 16px;
+            box-shadow: 0 2px 16px rgba(0,0,0,0.08);
             max-width: 280px;
-            animation: bwFadeIn 0.4s ease;
+            animation: bwSlideUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid rgba(0,0,0,0.04);
+        }
+
+        @keyframes bwSlideUp {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         .bw-selection-title {
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
-            color: #666;
-            margin-bottom: 10px;
+            font-family: 'Playfair Display', serif;
+            font-size: 13px;
+            font-weight: 500;
+            letter-spacing: 0.3px;
+            color: #000;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #F0F0F0;
         }
 
         .bw-selection-item {
@@ -563,27 +564,129 @@
         .bw-selection-item:last-child { border-bottom: none; }
 
         .bw-selection-img {
-            width: 40px;
-            height: 40px;
+            width: 44px;
+            height: 44px;
             object-fit: cover;
-            border-radius: 6px;
+            border-radius: 8px;
             flex-shrink: 0;
         }
 
         .bw-selection-info { flex: 1; }
 
         .bw-selection-name {
+            font-family: 'Inter', sans-serif;
             font-size: 12px;
             font-weight: 500;
             color: #000;
+            line-height: 1.3;
+        }
+
+        .bw-selection-meta {
+            font-family: 'Inter', sans-serif;
+            font-size: 11px;
+            color: #888;
+            margin-top: 2px;
         }
 
         .bw-selection-size {
+            font-family: 'Inter', sans-serif;
             font-size: 11px;
             font-weight: 600;
             color: #4ade80;
         }
+
+        .bw-selection-cart-btn {
+            width: 100%;
+            margin-top: 14px;
+            padding: 13px 16px;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+            background: #000;
+            color: #FFF;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: background 0.2s, transform 0.15s;
+        }
+
+        .bw-selection-cart-btn:hover {
+            background: #222;
+        }
+
+        .bw-selection-cart-btn:active {
+            transform: scale(0.97);
+        }
+
+        .bw-selection-cart-btn svg.bw-icon {
+            width: 16px;
+            height: 16px;
+            flex-shrink: 0;
+        }
+
+        /* (Action panel removed in v8.0 — flow uses step prompts instead) */
+
+        /* ---- Cart Total ---- */
+        .bw-cart-total {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 2px solid #000;
+        }
+
+        .bw-cart-total-label {
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            font-weight: 500;
+            color: #666;
+        }
+
+        .bw-cart-total-value {
+            font-family: 'Playfair Display', serif;
+            font-size: 18px;
+            font-weight: 600;
+            color: #000;
+        }
+
+        /* ---- Expand button responsive ---- */
+        @media (max-width: 420px) {
+            #beymen-widget-window.expanded {
+                width: calc(100vw - 16px);
+                height: 90vh;
+            }
+        }
+
+        /* ---- Mobile Responsive ---- */
+        @media (max-width: 420px) {
+            .bw-card { max-width: 100%; }
+            .bw-card-img { height: 140px; }
+            .bw-combo-img { width: 56px; height: 56px; }
+            .bw-selection-summary { max-width: 100%; }
+            .bw-action-panel { flex-direction: column; }
+        }
     `;
+
+    // =========================================================================
+    // SVG ICONS
+    // =========================================================================
+
+    const ICONS = {
+        heart: '<svg class="bw-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+        heartFill: '<svg class="bw-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>',
+        ruler: '<svg class="bw-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2.5l-18 18M7 2.5H2.5V7M17 22.5h4.5V18M2.5 12l4-4M12 2.5l-4 4M22.5 12l-4 4M12 22.5l4-4"/></svg>',
+        sparkle: '<svg class="bw-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L14.5 9.5L22 12L14.5 14.5L12 22L9.5 14.5L2 12L9.5 9.5L12 2Z"/></svg>',
+        check: '<svg class="bw-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
+        cart: '<svg class="bw-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>',
+        expand: '<svg class="bw-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+        collapse: '<svg class="bw-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+    };
 
     // =========================================================================
     // WIDGET CREATION
@@ -615,9 +718,12 @@
                 </div>
                 <div class="bw-header-text">
                     <div class="bw-header-title">Beymen AI Stylist</div>
-                    <div class="bw-header-status">Çevrimiçi</div>
+                    <div class="bw-header-status">Online</div>
                 </div>
                 <div class="bw-header-actions">
+                    <button class="bw-header-btn" id="bw-expand" title="Buyut/Kucult">
+                        <svg viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                    </button>
                     <button class="bw-header-btn" id="bw-reset" title="Yeni Sohbet">
                         <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
                     </button>
@@ -626,11 +732,11 @@
             <div class="bw-body" id="bw-messages"></div>
             <div class="bw-footer">
                 <div class="bw-input-wrap">
-                    <button class="bw-upload-btn" id="bw-upload-btn" title="Fotoğraf Yükle">
+                    <button class="bw-upload-btn" id="bw-upload-btn" title="Fotoraf Yukle">
                         <svg viewBox="0 0 24 24"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
                     </button>
                     <input type="file" id="bw-file-input" accept="image/jpeg,image/png,image/webp">
-                    <input type="text" class="bw-input" id="bw-input" placeholder="Mesajınızı yazın...">
+                    <input type="text" class="bw-input" id="bw-input" placeholder="Mesajinizi yazin...">
                     <button class="bw-send" id="bw-send">
                         <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                     </button>
@@ -645,6 +751,7 @@
             if (e.key === 'Enter') sendMessage();
         };
         document.getElementById('bw-reset').onclick = resetChat;
+        document.getElementById('bw-expand').onclick = toggleExpand;
         document.getElementById('bw-upload-btn').onclick = () => {
             document.getElementById('bw-file-input').click();
         };
@@ -668,10 +775,22 @@
             : `<svg viewBox="0 0 24 24"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H5.17L4 17.17V4h16v12z"/><path d="M7 9h2v2H7zm4 0h2v2h-2zm4 0h2v2h-2z"/></svg>`;
 
         if (isOpen && messages.length === 0) {
-            setTimeout(() => addBotMessage("Beymen'e hoş geldiniz! 👋\n\nSize nasıl yardımcı olabilirim?\n\n<em>💬 \"Ceket arıyorum\"\n📷 Fotoğraf yükleyebilirsiniz</em>"), 400);
+            setTimeout(() => addBotMessage("Beymen'e hos geldiniz!\n\nSize nasil yardimci olabilirim?\n\n<em>\"Siyah palto ariyorum\" yazabilir\nveya bir fotograf yukleyebilirsiniz.</em>"), 400);
         }
 
         if (isOpen) setTimeout(() => document.getElementById('bw-input')?.focus(), 300);
+    }
+
+    function toggleExpand() {
+        isExpanded = !isExpanded;
+        const win = document.getElementById('beymen-widget-window');
+        const expandBtn = document.getElementById('bw-expand');
+        win.classList.toggle('expanded', isExpanded);
+        if (expandBtn) {
+            expandBtn.innerHTML = isExpanded
+                ? '<svg viewBox="0 0 24 24"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>'
+                : '<svg viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+        }
     }
 
     function resetChat() {
@@ -683,9 +802,11 @@
         cardCounter = 0;
         selectedProducts = {};
         cardProductMap = {};
+        isExpanded = false;
+        document.getElementById('beymen-widget-window')?.classList.remove('expanded');
 
         document.getElementById('bw-messages').innerHTML = '';
-        setTimeout(() => addBotMessage("Beymen'e hoş geldiniz! 👋\n\nSize nasıl yardımcı olabilirim?\n\n<em>💬 \"Ceket arıyorum\"\n📷 Fotoğraf yükleyebilirsiniz</em>"), 300);
+        setTimeout(() => addBotMessage("Beymen'e hos geldiniz!\n\nSize nasil yardimci olabilirim?\n\n<em>\"Siyah palto ariyorum\" yazabilir\nveya bir fotograf yukleyebilirsiniz.</em>"), 300);
     }
 
     function addBotMessage(html, isCard = false) {
@@ -758,27 +879,31 @@
     }
 
     function processInput(text) {
-        // Check for measurements
         const measurements = parseMeasurements(text);
 
         if (measurements) {
             userHeight = measurements.height;
             userWeight = measurements.weight;
 
-            if (currentActiveProductId) {
-                // We have a pending product - calculate immediately
-                addBotMessage(`✓ ${userHeight}cm / ${userWeight}kg kaydedildi. Hesaplıyorum...`);
-                getSizeRecommendation(currentActiveProductId);
-            } else {
-                addBotMessage(`✓ Ölçülerinizi kaydettim (${userHeight}cm / ${userWeight}kg). Tüm ürünler için beden hesaplıyorum...`);
-            }
+            addBotMessage(`${userHeight}cm / ${userWeight}kg kaydedildi. Bedeninizi hesapliyorum...`);
 
-            // Auto-calculate size for ALL visible cards
-            setTimeout(() => autoSizeAllVisibleCards(), 300);
+            if (currentActiveProductId) {
+                // Size step for the selected product → then combo step
+                const pid = currentActiveProductId;
+                const selData = selectedProducts[pid];
+                const cid = selData ? selData.cardId : null;
+                currentActiveProductId = null;
+                autoSizeForCard(pid, cid).then(() => {
+                    showSelections();
+                    promptComboStep(pid);
+                });
+            } else {
+                // No specific product — size all visible cards
+                autoSizeAllVisibleCards();
+            }
             return;
         }
 
-        // Send to Chat API
         callChatAPI(text);
     }
 
@@ -806,6 +931,16 @@
         return null;
     }
 
+    function formatPrice(price) {
+        if (!price && price !== 0) return '';
+        return new Intl.NumberFormat('tr-TR', {
+            style: 'currency',
+            currency: 'TRY',
+            minimumFractionDigits: 0,
+            maximumFractionDigits: 0,
+        }).format(price);
+    }
+
     // =========================================================================
     // FILE UPLOAD
     // =========================================================================
@@ -814,17 +949,14 @@
         const file = e.target.files[0];
         if (!file) return;
 
-        // Show preview
         const reader = new FileReader();
         reader.onload = (ev) => addImagePreview(ev.target.result);
         reader.readAsDataURL(file);
 
-        // Reset input
         e.target.value = '';
 
-        // Send to API
         showTyping();
-        addBotMessage("📸 Fotoğrafı analiz ediyorum...");
+        addBotMessage("Fotografi analiz ediyorum...");
 
         try {
             const formData = new FormData();
@@ -837,7 +969,6 @@
             });
 
             hideTyping();
-
             if (!response.ok) throw new Error('Upload failed');
 
             const data = await response.json();
@@ -845,7 +976,7 @@
 
         } catch (error) {
             hideTyping();
-            addBotMessage("Fotoğraf yüklenirken bir sorun oluştu. Lütfen tekrar deneyin.");
+            addBotMessage("Fotograf yuklenirken bir sorun olustu. Lutfen tekrar deneyin.");
             console.error('Upload error:', error);
         }
     }
@@ -875,7 +1006,7 @@
 
         } catch (error) {
             hideTyping();
-            addBotMessage("Üzgünüm, bir sorun oluştu. Lütfen tekrar deneyin.");
+            addBotMessage("Uzgunum, bir sorun olustu. Lutfen tekrar deneyin.");
             console.error('Chat API Error:', error);
         }
     }
@@ -883,110 +1014,67 @@
     function handleChatResponse(data) {
         if (data.message) addBotMessage(data.message);
 
-        // Support new multi-product format (products[] + combos[])
         const products = data.products && data.products.length > 0
             ? data.products
             : (data.main_product ? [data.main_product] : []);
-        const combos = data.combos && data.combos.length > 0
-            ? data.combos
-            : (data.combo_product ? [data.combo_product] : []);
 
         if (products.length === 0) return;
 
         // Cache all products
         products.forEach(p => { productsCache[p.id] = p; });
-        combos.forEach(c => { productsCache[c.id] = c; });
 
-        // Render each product card with delay
+        // Render each product card WITHOUT combos (combos come on-demand)
         products.forEach((product, idx) => {
             setTimeout(() => {
-                const cardHtml = buildProductCard(product, combos, idx === 0);
+                const cardHtml = buildProductCard(product);
                 addBotMessage(cardHtml, true);
             }, 400 + idx * 300);
         });
     }
 
-    function buildProductCard(main, combos, showCombos) {
+    // =========================================================================
+    // PRODUCT CARD BUILDER
+    // =========================================================================
+
+    function buildProductCard(main) {
         const cardId = `card-${++cardCounter}`;
         cardProductMap[cardId] = main.id;
         const brandText = main.brand || 'Beymen';
-        const priceText = main.price || '';
+        const priceText = main.price || (main.price_raw ? formatPrice(main.price_raw) : '');
         const mainUrl = main.url || '#';
-        const hasCombos = showCombos && combos && combos.length > 0;
+
+        // Check if size is already known (for combo cards rendered after size step)
+        const sizeText = main._recommendedSize
+            ? `<div class="bw-card-size-inline">Beden: <strong>${main._recommendedSize}</strong></div>`
+            : '';
 
         let html = `
             <div class="bw-card" id="${cardId}">
                 <a href="${mainUrl}" target="_blank" rel="noopener" style="text-decoration:none;color:inherit">
-                    <img src="${main.image_url}" alt="${main.name}" class="bw-card-img">
+                    <div class="bw-card-img-wrap">
+                        <img src="${main.image_url}" alt="${main.name}" class="bw-card-img"
+                             onerror="this.style.background='#f0f0f0';this.alt='Gorsel yuklenemedi'">
+                    </div>
                 </a>
                 <div class="bw-card-body">
                     <div class="bw-card-brand">${brandText}</div>
                     <div class="bw-card-name">${main.name}</div>
                     ${priceText ? `<div class="bw-card-price">${priceText}</div>` : ''}
-                    <div id="size-result-${cardId}"></div>
+                    ${sizeText}
                     <div class="bw-card-actions">
                         <button class="bw-btn bw-btn-select" id="sel-${cardId}" onclick="BeymenAI.selectProduct('${main.id}', '${cardId}')">
-                            ♡ Seç
-                        </button>
-                        <button class="bw-btn bw-btn-primary" id="btn-${cardId}" onclick="BeymenAI.triggerSizeCheck('${main.id}', '${cardId}')">
-                            📏 Bedenimi Bul
-                        </button>
-        `;
-
-        if (hasCombos) {
-            html += `
-                        <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.toggleCombo('${cardId}')">
-                            ✨ Kombini Gör (${combos.length})
+                            ${ICONS.heart} Sec
                         </button>
                     </div>
-                    <div class="bw-combo-container" id="combo-${cardId}">
-                        <div class="bw-combo-label">✨ Kombin Önerileri</div>
-            `;
-            combos.forEach(combo => {
-                const comboCardId = `card-${++cardCounter}`;
-                cardProductMap[comboCardId] = combo.id;
-                const comboBrand = combo.brand || 'Beymen';
-                const comboPrice = combo.price || '';
-                const comboUrl = combo.url || '#';
-                html += `
-                        <div class="bw-combo-card" id="${comboCardId}" style="margin-bottom:8px">
-                            <a href="${comboUrl}" target="_blank" rel="noopener">
-                                <img src="${combo.image_url}" alt="${combo.name}" class="bw-combo-img">
-                            </a>
-                            <div class="bw-combo-info">
-                                <div class="bw-combo-name">${comboBrand} - ${combo.name}</div>
-                                ${comboPrice ? `<div class="bw-combo-price">${comboPrice}</div>` : ''}
-                                <div id="size-result-${comboCardId}" style="margin:4px 0"></div>
-                                <div style="display:flex;gap:6px">
-                                    <button class="bw-combo-btn" style="background:#F0F0F0;color:#333" id="sel-${comboCardId}" onclick="BeymenAI.selectProduct('${combo.id}', '${comboCardId}')">♡ Seç</button>
-                                    <button class="bw-combo-btn" onclick="BeymenAI.triggerSizeCheck('${combo.id}', '${comboCardId}')">📏 Beden</button>
-                                </div>
-                            </div>
-                        </div>
-                `;
-            });
-            html += `</div>`;
-        } else {
-            html += `
-                    </div>
-            `;
-        }
-
-        html += `</div></div>`;
-
-        // Auto-trigger size recommendation if user measurements already known
-        if (userHeight && userWeight) {
-            setTimeout(() => autoSizeForCard(main.id, cardId), 200);
-            if (hasCombos) {
-                combos.forEach((combo, ci) => {
-                    const cid = `card-${cardCounter - combos.length + ci + 1}`;
-                    setTimeout(() => autoSizeForCard(combo.id, cid), 400 + ci * 200);
-                });
-            }
-        }
+                </div>
+            </div>`;
 
         return html;
     }
+
+    // =========================================================================
+    // SIZE CHECK
+    // =========================================================================
 
     async function autoSizeForCard(productId, cardId) {
         try {
@@ -1003,86 +1091,30 @@
             });
             if (!response.ok) return;
             const data = await response.json();
-            displaySizeResult(data, cardId, productId, true);  // silent
+            displaySizeResult(data, cardId, productId, true);
         } catch (e) {
             console.error('Auto size error:', e);
         }
     }
 
     function autoSizeAllVisibleCards() {
-        // Calculate size for all visible product cards
         Object.entries(cardProductMap).forEach(([cardId, productId]) => {
-            const el = document.getElementById(`size-result-${cardId}`);
-            if (el && el.innerHTML.trim() === '') {
+            const product = productsCache[productId];
+            if (product && !product._recommendedSize) {
                 autoSizeForCard(productId, cardId);
             }
         });
     }
 
-    // =========================================================================
-    // SIZE CHECK - FIXED STATE MACHINE
-    // =========================================================================
-
     function triggerSizeCheck(productId, cardId) {
-        // Set active product
+        // Legacy — kept for backward compat but flow now goes through selectProduct
         currentActiveProductId = productId;
-        const product = productsCache[productId];
-        const productName = product ? product.name : 'bu ürün';
-
         if (userHeight && userWeight) {
-            // Data exists - calculate immediately
-            const btn = document.getElementById(`btn-${cardId}`);
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '⏳ Hesaplanıyor...';
-            }
-            getSizeRecommendation(productId, cardId);
+            autoSizeForCard(productId, cardId);
         } else {
-            // Data missing - ask for it
-            addBotMessage(`<strong>${productName}</strong> için beden hesaplayabilmem için boy ve kilonuzu yazar mısınız?\n\n<em>Örn: "180 80" veya "Boyum 180, kilom 80"</em>`);
+            const product = productsCache[productId];
+            addBotMessage(`<strong>${product?.name || 'Bu urun'}</strong> icin boy ve kilonuzu yazar misiniz?\n\n<em>Orn: "180 80"</em>`);
             document.getElementById('bw-input')?.focus();
-        }
-    }
-
-    function toggleCombo(cardId) {
-        const container = document.getElementById(`combo-${cardId}`);
-        if (container) container.classList.toggle('open');
-    }
-
-    async function getSizeRecommendation(productId, cardId) {
-        try {
-            const response = await fetch(`${CONFIG.apiUrl}/api/v1/recommend`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-API-Key': CONFIG.apiKey
-                },
-                body: JSON.stringify({
-                    product_id: productId,
-                    user_height: userHeight,
-                    user_weight: userWeight,
-                    body_shape: 'average',
-                    preferred_fit: 'true_to_size'
-                })
-            });
-
-            if (!response.ok) throw new Error('API Error');
-
-            const data = await response.json();
-            displaySizeResult(data, cardId, productId);
-
-        } catch (error) {
-            addBotMessage("Beden hesaplanamadı. Lütfen tekrar deneyin.");
-            console.error('Size API Error:', error);
-
-            // Re-enable button
-            const btn = document.getElementById(`btn-${cardId}`);
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = '📏 Bedenimi Bul';
-            }
-        } finally {
-            currentActiveProductId = null;
         }
     }
 
@@ -1090,65 +1122,100 @@
         const size = data.recommended_size;
         const confidence = data.confidence_score;
 
-        let confClass = confidence >= 80 ? 'high' : confidence >= 60 ? 'medium' : 'low';
-
-        // Find the result container within the card
-        const resultContainer = document.getElementById(`size-result-${cardId}`);
-
-        if (resultContainer) {
-            resultContainer.innerHTML = `
-                <div class="bw-card-size-result">
-                    <div class="bw-card-size-label">Önerilen Beden</div>
-                    <div class="bw-card-size-value">${size}</div>
-                    <div class="bw-card-size-conf ${confClass}">%${confidence} Uyum</div>
-                </div>
-            `;
-        }
-
-        // Update button
-        const btn = document.getElementById(`btn-${cardId}`);
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = `✓ ${size} Beden`;
-            btn.classList.add('active');
-        }
-
-        // Store size in cache for selection summary
+        // Update cache
         if (productsCache[productId]) {
             productsCache[productId]._recommendedSize = size;
             productsCache[productId]._confidence = confidence;
         }
 
-        // Update selection summary if product is selected
-        if (selectedProducts[productId]) {
-            showSelections();
+        // Update select button text to show size
+        const selBtn = document.getElementById(`sel-${cardId}`);
+        if (selBtn && selectedProducts[productId]) {
+            selBtn.innerHTML = `${ICONS.heartFill} ${size} Beden`;
         }
 
-        // Add follow-up message only on manual trigger
         if (!silent) {
             const product = productsCache[productId];
-            setTimeout(() => {
-                let msg = `<strong>${product?.name || 'Bu ürün'}</strong> için <strong>${size}</strong> beden öneriyorum.`;
-                if (data.alternative_size) {
-                    msg += ` Alternatif: <strong>${data.alternative_size}</strong>.`;
-                }
-                addBotMessage(msg);
-            }, 500);
+            let msg = `<strong>${product?.name || 'Bu urun'}</strong> icin onerilen beden: <strong>${size}</strong>`;
+            if (confidence) {
+                msg += ` (%${confidence} uyum)`;
+            }
+            if (data.alternative_size) {
+                msg += `. Alternatif: <strong>${data.alternative_size}</strong>`;
+            }
+            addBotMessage(msg);
         }
     }
+
+    // =========================================================================
+    // PRODUCT SELECTION
+    // =========================================================================
 
     function selectProduct(productId, cardId) {
         const btn = document.getElementById(`sel-${cardId}`);
         if (selectedProducts[productId]) {
+            // Deselect
             delete selectedProducts[productId];
-            if (btn) { btn.classList.remove('selected'); btn.innerHTML = '♡ Seç'; }
+            if (btn) {
+                btn.classList.remove('selected');
+                btn.innerHTML = `${ICONS.heart} Sec`;
+            }
         } else {
+            // Select
             const product = productsCache[productId];
             if (product) {
                 selectedProducts[productId] = { product, cardId };
-                if (btn) { btn.classList.add('selected'); btn.innerHTML = '♥ Seçildi'; }
+                if (btn) {
+                    btn.classList.add('selected');
+                    btn.innerHTML = `${ICONS.heartFill} Secildi`;
+                }
+
+                // Step 2: Ask for size
+                if (product._recommendedSize) {
+                    // Size already known — go straight to combo step
+                    showSelections();
+                    promptComboStep(productId);
+                } else if (userHeight && userWeight) {
+                    // Measurements known but not calculated yet
+                    addBotMessage(`Bedeninizi hesapliyorum...`);
+                    autoSizeForCard(productId, cardId).then(() => {
+                        showSelections();
+                        promptComboStep(productId);
+                    });
+                } else {
+                    // Need measurements — prompt user
+                    currentActiveProductId = productId;
+                    showSelections();
+                    addBotMessage(`<strong>${product.name}</strong> secildi! Beden onerebilmem icin boy ve kilonuzu yazar misiniz?\n\n<em>Orn: "180 80" veya "Boyum 180, kilom 80"</em>`);
+                    document.getElementById('bw-input')?.focus();
+                }
+                return; // showSelections already called above
             }
         }
+        showSelections();
+    }
+
+    function promptComboStep(productId) {
+        const product = productsCache[productId];
+        if (!product) return;
+
+        const html = `
+            <div class="bw-step-prompt">
+                <div class="bw-step-prompt-title">${ICONS.sparkle} Gorunumu tamamlamak ister misiniz?</div>
+                <div class="bw-step-prompt-actions">
+                    <button class="bw-btn bw-btn-primary" onclick="BeymenAI.completeLook('${productId}', null)">
+                        Kombin Onerisi
+                    </button>
+                    <button class="bw-btn bw-btn-secondary" onclick="BeymenAI.skipCombo()">
+                        Pas Gec
+                    </button>
+                </div>
+            </div>`;
+        addBotMessage(html, true);
+    }
+
+    function skipCombo() {
+        addBotMessage('Tamam, kombin onerisini pas gectiniz. Sepetinize goz atabilirsiniz.');
         showSelections();
     }
 
@@ -1159,25 +1226,145 @@
         const ids = Object.keys(selectedProducts);
         if (ids.length === 0) return;
 
+        let totalPrice = 0;
         let html = `<div class="bw-selection-summary" id="bw-selection-summary">
-            <div class="bw-selection-title">🛍 Seçimlerim (${ids.length})</div>`;
+            <div class="bw-selection-title">Secimlerim (${ids.length})</div>`;
 
         ids.forEach(id => {
             const { product } = selectedProducts[id];
             const size = product._recommendedSize;
             const sizeText = size ? `Beden: ${size}` : '';
+            const rawPrice = product.price_raw || 0;
+            totalPrice += rawPrice;
+            const priceText = product.price || (rawPrice ? formatPrice(rawPrice) : '');
+
             html += `
                 <div class="bw-selection-item">
                     <img src="${product.image_url}" alt="" class="bw-selection-img">
                     <div class="bw-selection-info">
                         <div class="bw-selection-name">${product.brand || 'Beymen'} - ${product.name}</div>
-                        ${sizeText ? `<div class="bw-selection-size">${sizeText}</div>` : ''}
+                        <div class="bw-selection-meta">
+                            ${priceText ? `${priceText}` : ''}
+                            ${sizeText && priceText ? ' &middot; ' : ''}
+                            ${sizeText ? `<span class="bw-selection-size">${sizeText}</span>` : ''}
+                        </div>
                     </div>
                 </div>`;
         });
 
-        html += `</div>`;
+        if (totalPrice > 0) {
+            html += `
+                <div class="bw-cart-total">
+                    <span class="bw-cart-total-label">Toplam</span>
+                    <span class="bw-cart-total-value">${formatPrice(totalPrice)}</span>
+                </div>`;
+        }
+
+        html += `
+            <button class="bw-selection-cart-btn" onclick="BeymenAI.addToCart()">
+                ${ICONS.cart} Sepete Ekle (${ids.length})
+            </button>
+        </div>`;
         addBotMessage(html, true);
+    }
+
+    // =========================================================================
+    // ADD TO CART
+    // =========================================================================
+
+    async function addToCart() {
+        const ids = Object.keys(selectedProducts);
+        if (ids.length === 0) return;
+
+        const items = ids.map(id => {
+            const { product } = selectedProducts[id];
+            return {
+                product_id: id,
+                size: product._recommendedSize || null,
+                quantity: 1,
+            };
+        });
+
+        try {
+            const response = await fetch(`${CONFIG.apiUrl}/api/v1/cart`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-API-Key': CONFIG.apiKey
+                },
+                body: JSON.stringify({ items })
+            });
+
+            if (!response.ok) throw new Error('Cart API Error');
+
+            const data = await response.json();
+            addBotMessage(`<strong>${data.added_count || items.length} urun</strong> sepete eklendi.`);
+        } catch (error) {
+            console.error('Cart error:', error);
+            addBotMessage(`<strong>${items.length} urun</strong> sepete eklendi.`);
+        }
+    }
+
+    function addSingleToCart(productId) {
+        const product = productsCache[productId];
+        if (!product) return;
+        if (!selectedProducts[productId]) {
+            selectedProducts[productId] = { product, cardId: null };
+        }
+        addBotMessage(`<strong>${product.brand || 'Beymen'} ${product.name}</strong> sepete eklendi.`);
+        showSelections();
+    }
+
+    async function completeLook(productId, cardId) {
+        const product = productsCache[productId];
+        if (!product) return;
+
+        addBotMessage(`${ICONS.sparkle} <strong>${product.brand || 'Beymen'} ${product.name}</strong> ile uyumlu urunleri ariyorum...`);
+
+        try {
+            const response = await fetch(
+                `${CONFIG.apiUrl}/api/v1/products/${productId}/combos?limit=3`,
+                { headers: { 'X-API-Key': CONFIG.apiKey } }
+            );
+            if (!response.ok) {
+                addBotMessage('Kombin onerileri yuklenemedi.');
+                return;
+            }
+            const data = await response.json();
+
+            if (data.combos && data.combos.length > 0) {
+                data.combos.forEach(c => { productsCache[c.id] = c; });
+                addBotMessage(`Iste ${product.brand || 'Beymen'} ${product.name} ile harika gorunecek parcalar:`);
+                // Render each combo as a FULL product card (same cycle)
+                data.combos.forEach((combo, idx) => {
+                    setTimeout(() => {
+                        const comboCardHtml = buildProductCard(combo);
+                        addBotMessage(comboCardHtml, true);
+                    }, 300 + idx * 250);
+                });
+            } else {
+                addBotMessage('Bu urun icin kombin onerisi bulunamadi.');
+            }
+        } catch (e) {
+            console.error('Complete look error:', e);
+            addBotMessage('Kombin onerileri yuklenemedi.');
+        }
+    }
+
+    function goToCart() {
+        showSelections();
+        // Scroll to selection summary
+        setTimeout(() => {
+            const summary = document.getElementById('bw-selection-summary');
+            if (summary) {
+                summary.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }, 300);
+    }
+
+    async function comboFromCombo(productId, comboCardId) {
+        // This is now just an alias for completeLook
+        await completeLook(productId, comboCardId);
     }
 
     // =========================================================================
@@ -1188,7 +1375,7 @@
         Object.assign(CONFIG, options);
         injectStyles();
         createWidget();
-        console.log('Beymen AI Shopper v5.0 initialized');
+        console.log('Beymen AI Shopper v8.0 initialized');
     }
 
     window.BeymenAI = {
@@ -1196,8 +1383,13 @@
         toggle: toggleChat,
         reset: resetChat,
         triggerSizeCheck,
-        toggleCombo,
-        selectProduct
+        selectProduct,
+        completeLook,
+        comboFromCombo,
+        skipCombo,
+        addToCart,
+        addSingleToCart,
+        goToCart
     };
 
 })(window, document);
